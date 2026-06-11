@@ -1,0 +1,62 @@
+name: Deploy — Cloudflare Workers (reusable)
+
+# Reusable: checkout → install wrangler → wrangler deploy [--env staging]
+#
+# Caller pattern (e.g. rolliq-com/site deploy.yml):
+#   jobs:
+#     deploy-staging:
+#       if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+#       uses: infra-commons/devops/.github/workflows/cloudflare-deploy-reusable.yml@main
+#       with:
+#         environment: staging
+#       secrets:
+#         cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#         cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#
+# Resulting check name: "<caller_job_id> / deploy"
+# Add "deploy-staging / deploy" to required_status_checks for staging gate.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "'staging' uses --env staging; 'production' omits --env"
+        required: true
+        type: string
+      wrangler_version:
+        description: "Wrangler major version to install via npm (default: 4)"
+        required: false
+        type: string
+        default: "4"
+    secrets:
+      cloudflare_api_token:
+        required: true
+      cloudflare_account_id:
+        required: true
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install wrangler
+        run: npm install -g "wrangler@${{ inputs.wrangler_version }}"
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.cloudflare_api_token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.cloudflare_account_id }}
+          DEPLOY_ENV: ${{ inputs.environment }}
+        run: |
+          if [ "$DEPLOY_ENV" = "staging" ]; then
+            wrangler deploy --env staging
+          else
+            wrangler deploy
+          fi
