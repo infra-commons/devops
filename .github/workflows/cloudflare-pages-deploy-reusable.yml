@@ -1,0 +1,79 @@
+name: Deploy — Cloudflare Pages (reusable)
+
+# Reusable: checkout → install wrangler → wrangler pages deploy
+#
+# Caller pattern (e.g. cashbucket-com/website deploy.yml):
+#   jobs:
+#     deploy-staging:
+#       if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+#       uses: infra-commons/devops/.github/workflows/cloudflare-pages-deploy-reusable.yml@main
+#       with:
+#         environment: staging
+#         project_name: my-pages-project
+#         directory: dist
+#       secrets:
+#         cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#         cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#
+# Resulting check name: "<caller_job_id> / deploy"
+# Add "deploy-staging / deploy" to required_status_checks for staging gate.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "'staging' or 'production'"
+        required: true
+        type: string
+      project_name:
+        description: "Cloudflare Pages project name"
+        required: true
+        type: string
+      directory:
+        description: "Directory containing built assets to deploy (default: dist)"
+        required: false
+        type: string
+        default: "dist"
+      wrangler_version:
+        description: "Wrangler major version to install via npm (default: 4)"
+        required: false
+        type: string
+        default: "4"
+    secrets:
+      cloudflare_api_token:
+        required: true
+      cloudflare_account_id:
+        required: true
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install wrangler
+        run: npm install -g "wrangler@${{ inputs.wrangler_version }}"
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.cloudflare_api_token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.cloudflare_account_id }}
+          DEPLOY_ENV: ${{ inputs.environment }}
+          PROJECT_NAME: ${{ inputs.project_name }}
+          DEPLOY_DIR: ${{ inputs.directory }}
+        run: |
+          if [ "$DEPLOY_ENV" = "staging" ]; then
+            wrangler pages deploy "$DEPLOY_DIR" \
+              --project-name "$PROJECT_NAME" \
+              --branch staging
+          else
+            wrangler pages deploy "$DEPLOY_DIR" \
+              --project-name "$PROJECT_NAME" \
+              --branch main
+          fi
