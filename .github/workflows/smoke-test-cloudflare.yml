@@ -1,0 +1,88 @@
+name: Smoke test — Cloudflare (reusable)
+
+# Reusable smoke test for Cloudflare Workers and Pages deployments.
+#
+# Caller pattern:
+#   jobs:
+#     smoke-test:
+#       needs: deploy
+#       uses: infra-commons/devops/.github/workflows/smoke-test-cloudflare.yml@main
+#       with:
+#         base_url: https://my-site-staging.workers.dev
+#         pages: '["/", "/about.html"]'
+#
+# Resulting check: "smoke-test / smoke-test"
+# Add this to required_status_checks in branch protection.
+
+on:
+  workflow_call:
+    inputs:
+      base_url:
+        description: "Base URL to test (no trailing slash)"
+        required: true
+        type: string
+      pages:
+        description: "JSON array of paths to check — each must return HTTP 200"
+        required: true
+        type: string
+      retries:
+        description: "Retry count per page (15s delay between retries)"
+        required: false
+        type: number
+        default: 3
+
+permissions: {}
+
+jobs:
+  smoke-test:
+    name: smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Run smoke tests
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          PAGES_JSON: ${{ inputs.pages }}
+          MAX_RETRIES: ${{ inputs.retries }}
+        run: |
+          set -euo pipefail
+
+          echo "Target: $BASE_URL"
+          echo "Pages:  $PAGES_JSON"
+
+          FAIL=0
+
+          while IFS= read -r path; do
+            path=$(echo "$path" | tr -d '"')
+            url="${BASE_URL}${path}"
+            success=false
+
+            for attempt in $(seq 1 "$MAX_RETRIES"); do
+              status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$url" || echo "000")
+              if [ "$status" = "200" ]; then
+                echo "OK  [$status] $url"
+                success=true
+                break
+              else
+                echo "... attempt $attempt/$MAX_RETRIES: $url returned $status"
+                if [ "$attempt" -lt "$MAX_RETRIES" ]; then
+                  sleep 15
+                fi
+              fi
+            done
+
+            if [ "$success" != "true" ]; then
+              echo "FAIL $url (all $MAX_RETRIES attempts exhausted)"
+              FAIL=1
+            fi
+          done < <(echo "$PAGES_JSON" | python3 -c "import sys,json; [print(p) for p in json.load(sys.stdin)]")
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "One or more smoke tests failed. Check the staging deployment."
+            exit 1
+          fi
+
+          echo ""
+          echo "All smoke tests passed."
