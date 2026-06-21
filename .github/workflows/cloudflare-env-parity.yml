@@ -1,0 +1,123 @@
+name: Cloudflare env parity (reusable)
+
+# Reusable guard-rail for Cloudflare Pages **Direct Upload** projects.
+#
+# Why this exists:
+#   Direct Upload deploys (cloudflare/pages-action) carry their app runtime secrets
+#   (e.g. ANTHROPIC_API_KEY, RESEND_API_KEY) NOT in the repo but in the Cloudflare Pages
+#   dashboard, set PER ENVIRONMENT (Preview vs Production) and bound only on redeploy.
+#   Nothing in git catches it when one environment silently drifts from the other — which
+#   is exactly what caused the 4-day nutrition-tracker staging macro outage (staging was
+#   missing/stale ANTHROPIC_API_KEY while production had it). D1 bindings are safe because
+#   they live in version-controlled wrangler.jsonc; the plaintext/secret env vars are not.
+#
+# What it does:
+#   Hits the Cloudflare API for the Pages project and asserts that the SET OF NAMES of
+#   env vars (plain + secret) configured for the `preview` environment matches the set for
+#   `production`. It compares NAMES ONLY — never values — so it is safe to print and never
+#   exposes a secret. A divergent name set fails the check.
+#
+# Caller pattern (standalone workflow in the app repo):
+#   jobs:
+#     env-parity:
+#       uses: infra-commons/devops/.github/workflows/cloudflare-env-parity.yml@<sha>
+#       with:
+#         project_name: kls-tracker
+#       secrets:
+#         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#
+# Resulting check: "env-parity / env-parity". The deploy token (Cloudflare Pages: Edit)
+# already has read access to project config, so no new secret is needed.
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        description: "Cloudflare Pages project name (e.g. kls-tracker)"
+        required: true
+        type: string
+      envs:
+        description: "JSON array of the two environment names to compare"
+        required: false
+        type: string
+        default: '["preview", "production"]'
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+permissions: {}
+
+jobs:
+  env-parity:
+    name: env-parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Compare env-var name sets across environments
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT_NAME: ${{ inputs.project_name }}
+          ENVS_JSON: ${{ inputs.envs }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.error
+
+          token   = os.environ["CLOUDFLARE_API_TOKEN"]
+          account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+          project = os.environ["PROJECT_NAME"]
+          a, b    = json.loads(os.environ["ENVS_JSON"])
+
+          url = (f"https://api.cloudflare.com/client/v4/accounts/"
+                 f"{account}/pages/projects/{project}")
+          req = urllib.request.Request(url, headers={
+              "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
+          })
+          try:
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  data = json.load(r)
+          except urllib.error.HTTPError as e:
+              print(f"::error::Cloudflare API HTTP {e.code} for project '{project}'. "
+                    f"Check the project name and that CLOUDFLARE_API_TOKEN has "
+                    f"'Cloudflare Pages: Read' (or Edit) on this account.")
+              print(e.read().decode("utf-8", "replace"))
+              sys.exit(1)
+
+          if not data.get("success"):
+              print(f"::error::Cloudflare API returned success=false: {data.get('errors')}")
+              sys.exit(1)
+
+          configs = (data.get("result") or {}).get("deployment_configs") or {}
+
+          def names(env):
+              cfg = configs.get(env) or {}
+              return set((cfg.get("env_vars") or {}).keys())
+
+          set_a, set_b = names(a), names(b)
+          print(f"{a:>12}: {sorted(set_a) or '(none)'}")
+          print(f"{b:>12}: {sorted(set_b) or '(none)'}")
+
+          only_a = sorted(set_a - set_b)
+          only_b = sorted(set_b - set_a)
+
+          if not only_a and not only_b:
+              print(f"\nOK — env-var name sets match across '{a}' and '{b}' "
+                    f"({len(set_a)} vars).")
+              sys.exit(0)
+
+          print()
+          if only_a:
+              print(f"::error::Only in '{a}', missing from '{b}': {only_a}")
+          if only_b:
+              print(f"::error::Only in '{b}', missing from '{a}': {only_b}")
+          print("\nEnvironments have diverged. Add the missing var(s) in the Cloudflare "
+                "Pages dashboard (Settings -> Variables and Secrets) for the deficient "
+                "environment, then redeploy that environment so they bind. "
+                "(This check compares NAMES only, never values.)")
+          sys.exit(1)
+          PY
