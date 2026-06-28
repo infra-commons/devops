@@ -7,7 +7,7 @@ name: Cloudflare env parity (reusable)
 #   (e.g. ANTHROPIC_API_KEY, RESEND_API_KEY) NOT in the repo but in the Cloudflare Pages
 #   dashboard, set PER ENVIRONMENT (Preview vs Production) and bound only on redeploy.
 #   Nothing in git catches it when one environment silently drifts from the other — which
-#   is exactly what caused the 4-day nutrition-tracker staging macro outage (staging was
+#   is exactly what caused a multi-day staging environment-variable drift outage (staging was
 #   missing/stale ANTHROPIC_API_KEY while production had it). D1 bindings are safe because
 #   they live in version-controlled wrangler.jsonc; the plaintext/secret env vars are not.
 #

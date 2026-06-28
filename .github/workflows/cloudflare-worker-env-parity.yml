@@ -8,7 +8,7 @@ name: Cloudflare Worker env parity (reusable)
 #   repo but in the Cloudflare dashboard, attached PER SCRIPT and bound only on the next
 #   deploy. When staging and production are two separate scripts (rolliq-site vs
 #   rolliq-site-staging), a secret added to one and forgotten on the other drifts silently
-#   — the same outage class that took out the nutrition-tracker macro tracker for 4 days.
+#   — the same outage class that has taken a staging app offline for days.
 #   `vars` declared in wrangler.jsonc are safe (version-controlled); dashboard SECRETS are not.
 #
 #   This is the Workers sibling of cloudflare-env-parity.yml (which covers Pages Direct
