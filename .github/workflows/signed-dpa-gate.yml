@@ -1,0 +1,154 @@
+name: Signed-DPA deploy gate (reusable)
+
+# Reusable: verifies that a production client has a current signed DPA before deployment.
+# Fails the deploy if contracts.dpa.status != "signed" or the sub-processor disclosure
+# is older than max_sub_processor_age_days.
+#
+# Caller pattern (add before the production deploy job):
+#
+#   jobs:
+#     dpa-gate:
+#       uses: infra-commons/devops/.github/workflows/signed-dpa-gate.yml@main
+#       with:
+#         client_slug: ${{ inputs.client_slug }}
+#       secrets:
+#         clients_config_token: ${{ secrets.CLIENTS_CONFIG_READ_TOKEN }}
+#
+#     deploy-production:
+#       needs: dpa-gate
+#       ...
+#
+# Required secret in the calling org:
+#   CLIENTS_CONFIG_READ_TOKEN — a fine-grained PAT with `contents: read` on the
+#   clients-config repo (or a GitHub App installation token for that org).
+#
+# Resulting check name: "<caller_job_id> / dpa-gate"
+# Add it to required_status_checks to hard-block production deploys without a signed DPA.
+
+on:
+  workflow_call:
+    inputs:
+      client_slug:
+        description: "Client slug matching clients/{slug}.yaml in clients-config"
+        required: true
+        type: string
+      clients_config_repo:
+        description: "Org/repo containing client YAML files (default: rolliq-com/clients-config)"
+        required: false
+        type: string
+        default: rolliq-com/clients-config
+      clients_config_ref:
+        description: "Git ref to read from clients-config"
+        required: false
+        type: string
+        default: main
+      max_sub_processor_age_days:
+        description: >
+          Maximum age (days) for sub_processors_current_as_of before the gate fails.
+          Set to 0 to disable the age check.
+        required: false
+        type: number
+        default: 365
+    secrets:
+      clients_config_token:
+        description: >
+          GitHub token with contents:read on clients_config_repo.
+          A fine-grained PAT scoped to the clients-config repo is recommended.
+        required: true
+
+permissions: {}
+
+jobs:
+  dpa-gate:
+    name: dpa-gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Fetch client config
+        env:
+          GH_TOKEN: ${{ secrets.clients_config_token }}
+          REPO: ${{ inputs.clients_config_repo }}
+          REF: ${{ inputs.clients_config_ref }}
+          SLUG: ${{ inputs.client_slug }}
+        run: |
+          HTTP=$(curl -sf -o client.yaml -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "https://api.github.com/repos/${REPO}/contents/clients/${SLUG}.yaml?ref=${REF}")
+          if [[ "$HTTP" != "200" ]]; then
+            echo "::error::Cannot fetch clients/${SLUG}.yaml from ${REPO}@${REF} (HTTP ${HTTP}). Check client_slug and CLIENTS_CONFIG_READ_TOKEN."
+            exit 1
+          fi
+
+      - name: Verify signed DPA
+        env:
+          SLUG: ${{ inputs.client_slug }}
+          MAX_AGE_DAYS: ${{ inputs.max_sub_processor_age_days }}
+        run: |
+          python3 - <<'PYEOF'
+          import sys, os, datetime
+
+          try:
+              import yaml
+          except ImportError:
+              import subprocess
+              subprocess.run([sys.executable, "-m", "pip", "install", "pyyaml", "-q"], check=True)
+              import yaml
+
+          slug = os.environ["SLUG"]
+          max_age = int(os.environ["MAX_AGE_DAYS"])
+
+          with open("client.yaml") as f:
+              client = yaml.safe_load(f)
+
+          errors = []
+
+          contracts = client.get("contracts")
+          if not contracts:
+              errors.append(
+                  f"client '{slug}' has no 'contracts' block — "
+                  "a signed DPA is required before production deployment"
+              )
+          else:
+              dpa = contracts.get("dpa")
+              if not dpa:
+                  errors.append(
+                      f"client '{slug}' has no 'contracts.dpa' block — "
+                      "add the DPA record to clients-config before deploying to production"
+                  )
+              else:
+                  status = dpa.get("status", "none")
+                  if status != "signed":
+                      errors.append(
+                          f"client '{slug}' DPA status is '{status}' — "
+                          "status must be 'signed' before production deployment"
+                      )
+
+                  if max_age > 0:
+                      sp_str = dpa.get("sub_processors_current_as_of")
+                      if not sp_str:
+                          errors.append(
+                              f"client '{slug}' missing 'contracts.dpa.sub_processors_current_as_of' — "
+                              "add the date the disclosed sub-processor list was last accurate"
+                          )
+                      else:
+                          sp_date = datetime.date.fromisoformat(str(sp_str))
+                          age_days = (datetime.date.today() - sp_date).days
+                          if age_days > max_age:
+                              errors.append(
+                                  f"client '{slug}' sub_processors_current_as_of is {age_days} days old "
+                                  f"(max {max_age} days) — the DPA sub-processor disclosure is stale; "
+                                  "issue a change notice or update the DPA before deploying"
+                              )
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+
+          print(f"DPA gate passed for '{slug}'.")
+          print(f"  status: {client['contracts']['dpa']['status']}")
+          print(f"  sub_processors_current_as_of: {client['contracts']['dpa'].get('sub_processors_current_as_of', 'N/A')}")
+          PYEOF
