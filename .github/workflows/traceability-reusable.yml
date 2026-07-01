@@ -1,0 +1,45 @@
+name: Traceability check (reusable)
+
+# Canonical requirements-traceability check, shared by every Rolliq solution.
+#
+# Caller pattern (the caller must trigger on `pull_request`):
+#   jobs:
+#     traceability:
+#       uses: infra-commons/devops/.github/workflows/traceability-reusable.yml@<SHA> # pin to an immutable SHA
+#       secrets: inherit          # passes ANTHROPIC_API_KEY
+#
+# The caller grants nothing extra; this workflow declares its own permissions.
+# Resulting check: `<caller-job-id> / traceability`. Advisory only — do NOT make
+# it a required status check; it posts a PR comment and never fails the build on
+# findings.
+
+# Default all permissions to none — each job declares exactly what it needs.
+permissions: {}
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false   # absent in Dependabot/fork contexts; the check skips itself
+
+jobs:
+  traceability:
+    name: traceability
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Skip forks and Dependabot PRs — no secret access.
+    if: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository
+          && github.actor != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # NOTE: pin the action ref to this repo's merge SHA after first merge
+      # (matches the adversarial-review convention). @main is used pre-merge.
+      - uses: infra-commons/devops/.github/actions/traceability@main
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ github.token }}
+          pr-number: ${{ github.event.pull_request.number }}
+          repo: ${{ github.repository }}
