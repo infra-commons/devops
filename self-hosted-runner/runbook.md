@@ -195,3 +195,35 @@ Same one line, reversed:
    and fails on the first self-hosted re-run (real hit: `Expand-Archive -DestinationPath` without
    `-Force` errored on existing files). **Audit every extract/copy-into-fixed-path step for
    idempotency before cutover** (overwrite or clean-first). Ephemeral GitHub runners avoid this.
+8. **The runner's python SEES the host user's `~/.local` (user-site).** This is the sharpest,
+   least-obvious self-hosted-python trap, and **ephemerality does NOT fix it** — user-site lives in
+   `$HOME`, not the work dir, so a fresh runner still sees it. If the box's user has ever done
+   `pip install --user` (an interactive dev env), a job's bare `pip install` both *reads* those
+   versions (resolver picks them up) and *mutates* them (upgrades a shared dep like `opentelemetry`
+   out from under the user's own tools). Different jobs want different versions → collisions that get
+   **worse each run**. Real hit (rolliq rrc, 2026-07-24): a bare `pip install -e ".[dev]"` co-mingled
+   the project's dep closure into the user's `~/.local`, cascade-failing lint/test/semgrep. **Two-part
+   fix:** (a) **every python job installs into its own `python -m venv` and calls the venv binaries by
+   path** (`.venv/bin/ruff`, `.venv/bin/pytest`) — a venv ignores user-site and sidesteps PEP-668;
+   (b) set **`PYTHONNOUSERSITE=1` in the runner `.env`** so the runner's python can never read/write
+   `~/.local`. **Never delete the host `~/.local`** to "clean" it — it's the human's dev environment.
+9. **`~/.local/bin` on the job PATH shadows venv tool wrappers.** Even with a correct venv install, a
+   tool whose launcher re-resolves a helper *by name* via PATH can jump back out to the host shim. Real
+   hit: `.venv/bin/semgrep` re-dispatches to `pysemgrep` found on PATH → picked up `~/.local/bin/pysemgrep`
+   (which then can't import its module under `PYTHONNOUSERSITE=1` → `ModuleNotFoundError`). **Fix:**
+   call the venv's own entrypoint by absolute path (`.venv/bin/pysemgrep`) **and** `export PATH="$VENV/bin:$PATH"`
+   before invoking, so any internal name lookup stays in-venv.
+10. **Clean-env-per-job WITHOUT a full ephemeral runner.** True ephemeral (`--ephemeral`, destroy +
+    re-register per job) needs a **fresh registration token each cycle** = an admin credential on the
+    box. If your automation identity is a repo/org *member* it **cannot mint registration tokens** (the
+    API 404s), so unattended auto-re-register needs a stored admin PAT (a real, ongoing security
+    surface — decide deliberately). A lighter equivalent that needs no token: keep the persistent
+    registration and add an **`ACTIONS_RUNNER_HOOK_JOB_STARTED`** hook (path set in `.env`) that wipes
+    `_work/_tool` + `_work/_temp` before each job. Combined with (8)+(9) this gives a contamination-free
+    env per job. **Restarting an already-configured runner needs NO token** — it re-auths with its
+    stored `.credentials`; only `config.sh` (first register / re-register) consumes a registration token.
+11. **Durability without sudo:** the runner's own `svc.sh install` writes a *system* unit (needs root).
+    If `loginctl` shows `Linger=yes` for the user (or you can enable it), a **`systemctl --user`** unit
+    running `run.sh` survives logout/reboot with no sudo. See [`templates/gh-runner.service`](templates/gh-runner.service).
+    **Do not flip a *required* CI gate to `[self-hosted, …]` until the runner is durable** — a plain
+    `nohup run.sh` dies on reboot and every required check then hangs `queued` forever, blocking all PRs.
