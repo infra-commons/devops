@@ -166,6 +166,14 @@ Same one line, reversed:
 - **GitHub-specific and severe: NEVER attach a self-hosted runner to a public repo.** A fork PR can
   run arbitrary code on the runner → RCE on your box. GitHub documents this explicitly. ADO's PR gate
   carries the same principle, but GitHub's fork-PR exposure is a sharper edge.
+- **An ORG-LEVEL runner is reachable by every repo in the org, including public ones** — the same
+  fork-PR RCE, one indirection away, and a per-repo visibility check cannot see it. So
+  `register-gh-runner.sh` requires `--group` for org scope and verifies over the API that the group
+  is restricted to selected repos with `allows_public_repositories: false`. Prefer repo scope.
+- **The visibility gate fails CLOSED.** Only an affirmative `private`/`internal` reading proceeds; an
+  API error, a renamed repo, a token that cannot see the repo, a rate limit or broken `gh` auth all
+  refuse. A non-answer is not evidence a repo is not public. `--i-understand-public` skips the gate
+  entirely — it is an assertion about *your* host isolation, not a way around broken auth.
 - Prefer **ephemeral, single-job runners** (GitHub); scope registration tokens least-privilege;
   isolate the runner OS user; consider a dedicated host/VM for org-level runners.
 - ADO dev/prod pipelines run already-merged code → lower risk than a PR-build gate that compiles
@@ -227,3 +235,10 @@ Same one line, reversed:
     running `run.sh` survives logout/reboot with no sudo. See [`templates/gh-runner.service`](templates/gh-runner.service).
     **Do not flip a *required* CI gate to `[self-hosted, …]` until the runner is durable** — a plain
     `nohup run.sh` dies on reboot and every required check then hangs `queued` forever, blocking all PRs.
+12. **Re-running `register-gh-runner.sh` used to be only *half* idempotent.** Step 2 skips `config.sh`
+    when `.runner` exists, but the service step went on to `sudo ./svc.sh install` regardless — and
+    because `svc.sh` writes a *system* unit it knows nothing about a `systemd --user` unit (gotcha #11)
+    already serving that directory. The result was **two services racing for the same `_work` dir**. The
+    script now detects an existing manager (`.service` marker, a live `Runner.Listener` for that dir, or
+    a user unit whose `ExecStart`/`WorkingDirectory` references it) and skips the install with a note.
+    If you *want* to move a runner between services, stop and remove the old one first.
