@@ -1,0 +1,46 @@
+name: Signed-DPA gate self-test
+
+# The signed-DPA gate decides whether a production deploy may proceed, and until now
+# nothing tested it. It had also never been observed to fail — and a gate that cannot
+# fail is indistinguishable from one that passes.
+#
+# scripts/test_signed_dpa_gate.py executes the verification program lifted out of
+# signed-dpa-gate.yml itself, so this job tests the shipped artefact rather than a copy
+# that can quietly drift away from it. Most of the suite is negative controls: records
+# that MUST be rejected, asserted to be rejected, with an actionable ::error:: rather
+# than a traceback.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/signed-dpa-gate.yml"
+      - ".github/workflows/dpa-gate-self-test.yml"
+      - "scripts/test_signed_dpa_gate.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/signed-dpa-gate.yml"
+      - ".github/workflows/dpa-gate-self-test.yml"
+      - "scripts/test_signed_dpa_gate.py"
+
+concurrency:
+  group: dpa-gate-self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  self-test:
+    name: Gate negative controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Run the gate's negative controls
+        run: python3 scripts/test_signed_dpa_gate.py

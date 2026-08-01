@@ -1,8 +1,37 @@
 name: Signed-DPA deploy gate (reusable)
 
 # Reusable: verifies that a production client has a current signed DPA before deployment.
-# Fails the deploy if contracts.dpa.status != "signed" or the sub-processor disclosure
-# is older than max_sub_processor_age_days.
+# Fails the deploy if the DPA record is not in an acceptable state, or the sub-processor
+# disclosure is older than max_sub_processor_age_days.
+#
+# A DPA record is acceptable in exactly two ways:
+#
+#   status: signed         an agreement was executed with a counterparty. Must carry
+#                          signed_original_link (an absolute http(s) URL to the executed
+#                          document), signed_date and version.
+#   status: self_attested  there is no counterparty: the operator is both controller and
+#                          processor of the data this deployment handles, so no document
+#                          exists to link. Accepted ONLY where tags.data_class is
+#                          `internal`.
+#
+# Why the evidence requirement exists. `signed` on its own is a self-declared string. A
+# record that says `signed` and points at nothing is indistinguishable, to the gate and to
+# any auditor reading the config, from one backed by an executed agreement — so the gate
+# passed for both and reported success either way. Requiring the record to name the
+# document makes the two cases different in the only place a machine can see.
+#
+# Why the link is not fetched. Presence and well-formedness only, never resolvability. A
+# canonical link to an executed agreement is typically permission-gated (a shared drive),
+# so fetching it would need document-store credentials on the deploy path and could not
+# distinguish a 403 from a dead link. Such a check either fails open — the exact defect
+# this closes — or blocks production deploys on a permissions quirk unrelated to whether
+# the agreement exists.
+#
+# Why self_attested is a status rather than an exemption. Letting internal deployments
+# skip the evidence rule would express the exception as a filter on the gate's input, and
+# the gate would lose the ability to report on its own exceptions: nothing downstream
+# could count how many deployments rely on one. As a status it is a value in the config,
+# greppable and visible in this job's log.
 #
 # Caller pattern (add before the production deploy job):
 #
@@ -88,7 +117,7 @@ jobs:
           MAX_AGE_DAYS: ${{ inputs.max_sub_processor_age_days }}
         run: |
           python3 - <<'PYEOF'
-          import sys, os, datetime
+          import sys, os, datetime, urllib.parse
 
           try:
               import yaml
@@ -105,26 +134,97 @@ jobs:
 
           errors = []
 
+          # A record with no counterparty may use this status instead of borrowing
+          # `signed`, but only where the data is the operator's own. Any other data class
+          # implies a counterparty, and therefore an agreement that can be pointed at.
+          SELF_ATTESTED_DATA_CLASS = "internal"
+
+          def well_formed_link(value):
+              """True for an absolute http(s) URL. Deliberately narrower than the config
+              schema's `format: uri`, which also admits schemes (urn:, mailto:) that are
+              not a retrievable document. A file that passes the schema but fails here
+              fails LOUDLY at deploy time with the message below, rather than deploying
+              on a link nobody can open. Keep the two in step: this is the stricter end
+              of one contract split across two repositories."""
+              if not isinstance(value, str) or not value.strip():
+                  return False
+              parts = urllib.parse.urlsplit(value.strip())
+              return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+          # Shape guards. This file comes from another repository and is parsed, not
+          # validated, here — so a malformed block must produce an ::error:: the operator
+          # can act on, never a traceback. An unexplained step failure is
+          # indistinguishable from an infrastructure blip and tends to get retried
+          # rather than fixed.
+          if not isinstance(client, dict):
+              client = {}
+
           contracts = client.get("contracts")
-          if not contracts:
+          if not contracts or not isinstance(contracts, dict):
               errors.append(
-                  f"client '{slug}' has no 'contracts' block — "
+                  f"client '{slug}' has no usable 'contracts' block — "
                   "a signed DPA is required before production deployment"
               )
           else:
               dpa = contracts.get("dpa")
-              if not dpa:
+              if not dpa or not isinstance(dpa, dict):
                   errors.append(
-                      f"client '{slug}' has no 'contracts.dpa' block — "
+                      f"client '{slug}' has no usable 'contracts.dpa' block — "
                       "add the DPA record to clients-config before deploying to production"
                   )
               else:
                   status = dpa.get("status", "none")
-                  if status != "signed":
+                  tags = client.get("tags")
+                  data_class = tags.get("data_class") if isinstance(tags, dict) else None
+
+                  if status not in ("signed", "self_attested"):
                       errors.append(
                           f"client '{slug}' DPA status is '{status}' — "
-                          "status must be 'signed' before production deployment"
+                          "status must be 'signed' before production deployment "
+                          "(or 'self_attested', for a deployment whose data has no "
+                          "external counterparty)"
                       )
+                  elif status == "signed":
+                      # `signed` has to name the executed document, the version executed,
+                      # and when. Reported as three separate errors so one run tells the
+                      # operator everything that is missing.
+                      link = dpa.get("signed_original_link")
+                      if link is None or not str(link).strip():
+                          errors.append(
+                              f"client '{slug}' DPA status is 'signed' but "
+                              "'contracts.dpa.signed_original_link' is missing — a signed "
+                              "DPA must point at the executed document. Add the canonical "
+                              "link, or use status 'self_attested' if no counterparty "
+                              "agreement exists"
+                          )
+                      elif not well_formed_link(link):
+                          errors.append(
+                              f"client '{slug}' 'contracts.dpa.signed_original_link' is not "
+                              "an absolute http(s) URL — the gate checks the link is "
+                              "well-formed, never that it resolves, so it must at least be "
+                              "a link"
+                          )
+                      for field in ("signed_date", "version"):
+                          value = dpa.get(field)
+                          if value is None or not str(value).strip():
+                              errors.append(
+                                  f"client '{slug}' DPA status is 'signed' but "
+                                  f"'contracts.dpa.{field}' is missing — record which "
+                                  "version was executed and when"
+                              )
+                  elif status == "self_attested":
+                      if data_class != SELF_ATTESTED_DATA_CLASS:
+                          errors.append(
+                              f"client '{slug}' DPA status is 'self_attested' but "
+                              f"tags.data_class is "
+                              f"'{data_class if data_class is not None else '(unset)'}', "
+                              f"not '{SELF_ATTESTED_DATA_CLASS}' — self_attested means "
+                              "there is no external counterparty and so no document to "
+                              "link, which is only true of the operator's own data. A "
+                              "deployment handling anyone else's data needs an executed "
+                              "agreement (status 'signed'). Do not reclassify the data to "
+                              "fit the contract"
+                          )
 
                   if max_age > 0:
                       sp_str = dpa.get("sub_processors_current_as_of")
@@ -148,7 +248,23 @@ jobs:
                   print(f"::error::{e}")
               sys.exit(1)
 
+          # Report WHICH of the two acceptable states was satisfied, and on what evidence.
+          # A pass that renders identically for an executed agreement and for a record
+          # with no counterparty would put the original defect straight back into the log:
+          # the operator reading it could not tell the two apart either.
+          dpa_record = client["contracts"]["dpa"]
+          final_status = dpa_record["status"]
           print(f"DPA gate passed for '{slug}'.")
-          print(f"  status: {client['contracts']['dpa']['status']}")
-          print(f"  sub_processors_current_as_of: {client['contracts']['dpa'].get('sub_processors_current_as_of', 'N/A')}")
+          print(f"  status: {final_status}")
+          if final_status == "signed":
+              print(f"  executed document: {dpa_record['signed_original_link']}")
+              print(f"  version {dpa_record['version']} executed {dpa_record['signed_date']}")
+              print("  (link checked for well-formedness only — NOT fetched, NOT resolved)")
+          else:
+              print(
+                  f"  no counterparty agreement: self-attested on data_class "
+                  f"'{SELF_ATTESTED_DATA_CLASS}'. This deployment passed WITHOUT an "
+                  f"executed DPA, by design."
+              )
+          print(f"  sub_processors_current_as_of: {dpa_record.get('sub_processors_current_as_of', 'N/A')}")
           PYEOF
