@@ -1,0 +1,43 @@
+name: Auto-assign reusable — self-test
+
+# auto-assign-reusable.yml decides who a pull request lands on, and every way it can go
+# wrong is quiet: assigning nobody, assigning the wrong person, or skipping a PR that
+# needed assigning all produce a green check and an empty queue.
+#
+# scripts/test_auto_assign_reusable.py executes the decision program lifted out of the
+# workflow itself, so this tests the shipped artefact rather than a copy that can quietly
+# drift away from it. Most of the suite is negative controls.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/auto-assign-reusable.yml"
+      - ".github/workflows/auto-assign-self-test.yml"
+      - "scripts/test_auto_assign_reusable.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/auto-assign-reusable.yml"
+      - ".github/workflows/auto-assign-self-test.yml"
+      - "scripts/test_auto_assign_reusable.py"
+
+concurrency:
+  group: auto-assign-self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  self-test:
+    name: Auto-assign negative controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the decision program's negative controls
+        # Stdlib-only: this decides whether a merge-adjacent gate is sound, so it should
+        # not be able to break on a dependency resolution.
+        run: python3 scripts/test_auto_assign_reusable.py

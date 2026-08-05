@@ -1,0 +1,25 @@
+name: Auto-assign
+
+# This repository's own caller of auto-assign-reusable.yml. Dogfooding: the reusable is
+# exercised on every pull request here before any other repository adopts it.
+#
+# The local `./` reference is deliberate — it resolves against the commit under test, so a
+# change to the reusable is proven on the pull request that makes it rather than after it
+# merges. Repositories adopting this pin the published SHA instead:
+#
+#   uses: infra-commons/devops/.github/workflows/auto-assign-reusable.yml@<SHA>
+#
+# `ready_for_review` is included so a PR opened as a draft is assigned the moment it is
+# ready, rather than never.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  assign:
+    uses: ./.github/workflows/auto-assign-reusable.yml
+    permissions:
+      pull-requests: write
