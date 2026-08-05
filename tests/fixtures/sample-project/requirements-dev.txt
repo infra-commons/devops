@@ -1,0 +1,4 @@
+# Pinned, matching this org's version-pinning posture. The fixture exercises the
+# reusable's `-r <file>` install shape, as distinct from `-e .[dev]` or explicit pins.
+pytest==9.0.3
+pytest-cov==7.1.0

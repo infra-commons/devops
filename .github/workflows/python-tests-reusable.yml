@@ -1,0 +1,402 @@
+name: Python tests + coverage (reusable)
+
+# Reusable: checkout → setup-python → venv → install → pytest [+ coverage].
+#
+# One workflow for every Python repo in the fleet, whose layouts differ in ways that are
+# deliberate rather than accidental: a `src/` package installed editable, a `scripts/` tree
+# with no package at all, a tests directory per composite action, two source roots at once.
+# The inputs below are exactly the axes on which those repos actually differ — anything
+# they agree on (a venv, sysmon coverage, a derandomised hypothesis profile) is fixed here
+# and is not an input, because a knob nobody should turn is a knob somebody eventually will.
+#
+# Caller pattern:
+#   jobs:
+#     test:
+#       uses: infra-commons/devops/.github/workflows/python-tests-reusable.yml@<SHA>
+#       with:
+#         source_dir: src
+#         test_path: tests
+#         install: -e .[dev]
+#         coverage: floor:80
+#
+# Resulting check name: "<caller_job_id> / pytest"  (e.g. "test / pytest").
+# Renaming an EXISTING required check is the dangerous half of adopting this: a required
+# check that never reports leaves every PR unmergeable. Update the branch protection /
+# ruleset entry in the same change as the caller wiring — see docs/python-tests.md.
+#
+# ── The coverage input ────────────────────────────────────────────────────────────────
+#
+# `coverage` takes `none`, `report`, or `floor:N`, and that grammar is deliberately the
+# same one `devops-manifest.yaml` uses to DECLARE each repo's posture. One vocabulary, so
+# a caller's `with:` block and the manifest entry describing it can be compared without a
+# translation step.
+#
+# Three postures, because the fleet holds two reasoned and opposite positions and a
+# standard that could express only one would be picking a side by omission:
+#
+#   none      Do not measure. For repos whose suites are per-directory unit tests over
+#             composite actions, where a whole-repo percentage means nothing.
+#   report    Measure and print, never fail on the number. The argument against gating:
+#             a measurement on one project's suite found that replacing every one of its
+#             ~1600 assertions with `pass` still cleared an 80% gate, and deleting a tenth
+#             of the tests outright left CI green — coverage counts lines a test caused to
+#             execute and cannot see whether anything was asserted about them. What it DOES
+#             answer, and nothing else here does, is which modules are untested at all: a
+#             new file with no tests shows up as a 0% row instead of being silently absent.
+#   floor:N   Measure and fail below N. The counter-argument, from the projects that chose
+#             one: set BELOW the measured rate, it is a regression floor and not a target —
+#             it never blocks ordinary work, and it fails when a change deletes or bypasses
+#             tested code wholesale.
+#
+# An unrecognised value is REJECTED, never degraded to report-only. Silently downgrading
+# `floor:80` because it was misspelled would remove a gate while the log still said the
+# job passed.
+#
+# ── Why the coverage census step exists ───────────────────────────────────────────────
+#
+# Measured, not assumed: under `report`, `--cov=<a-path-that-does-not-exist>` exits ZERO.
+# pytest-cov emits a CovReportWarning, writes no report at all, and the job goes green. A
+# coverage step that is silently measuring nothing is indistinguishable, in the run log and
+# in the check mark, from one that measured a healthy tree — so the guarantee needs its own
+# observation. Two of them, in fact: a pre-flight assertion that every source path exists,
+# and a post-run census that at least one file was actually measured. Under `floor:N` the
+# floor catches it (0% < N), which is precisely why the hole is invisible: it only opens on
+# the repos that chose not to gate.
+
+on:
+  workflow_call:
+    inputs:
+      test_path:
+        description: >
+          Path(s) passed to pytest, whitespace-separated. Empty means pytest's own rootdir
+          discovery (which is what a repo with testpaths in pyproject.toml wants).
+        required: false
+        type: string
+        default: "tests"
+      source_dir:
+        description: >
+          Source path(s) to measure, whitespace-separated — one --cov= per entry. Must be
+          empty when coverage is `none`, and non-empty otherwise.
+        required: false
+        type: string
+        default: ""
+      coverage:
+        description: "`none`, `report`, or `floor:N` (N in 0..100). Anything else fails the job."
+        required: false
+        type: string
+        default: "report"
+      python_version:
+        description: "Python version for actions/setup-python (default: 3.12)"
+        required: false
+        type: string
+        default: "3.12"
+      install:
+        description: >
+          Arguments for `pip install` — NOT a shell command; only pip is ever invoked.
+          Covers every install shape in the fleet: `-e .[dev]`, `-r requirements.txt -r
+          requirements-dev.txt`, or a list of explicit pins. Empty installs nothing.
+        required: false
+        type: string
+        default: ""
+      pytest_args:
+        description: "Extra pytest flags (default: -v --tb=short)"
+        required: false
+        type: string
+        default: "-v --tb=short"
+      pytest_version:
+        description: >
+          Pin pytest to this exact version. Empty (the default) means the caller's `install`
+          is expected to provide it; the job then asserts it imports and fails with an
+          actionable error if not. Never silently overrides a caller's own pin.
+        required: false
+        type: string
+        default: ""
+      pytest_cov_version:
+        description: >
+          Pin pytest-cov to this exact version. Empty means the caller's `install` provides
+          it. Repos that install from requirements files often carry pytest but not
+          pytest-cov — they set this rather than getting a hidden install they did not pin.
+        required: false
+        type: string
+        default: ""
+      runner_labels:
+        description: >
+          JSON array of runner labels, e.g. '["self-hosted","<your-label>"]'. A string
+          because workflow_call inputs cannot be arrays; consumed via fromJSON.
+        required: false
+        type: string
+        default: '["ubuntu-latest"]'
+      checkout_submodules:
+        description: "Passed to actions/checkout `submodules` ('false', 'true' or 'recursive')"
+        required: false
+        type: string
+        default: "false"
+      fetch_depth:
+        description: >
+          Passed to actions/checkout `fetch-depth`; 0 fetches all history. Suites that
+          build throwaway git repositories or read the repo's own refs need 0. The default
+          shallow clone is still a real work tree, which is all a suite shelling out to
+          `git ls-files` requires.
+        required: false
+        type: number
+        default: 1
+      cache_dependency_path:
+        description: >
+          Dependency file glob for setup-python's pip cache. Empty (the default) disables
+          caching — setup-python errors out when told to cache and it finds no dependency
+          file, which several repos here genuinely do not have.
+        required: false
+        type: string
+        default: ""
+      timeout_minutes:
+        description: "Job timeout in minutes (default: 15)"
+        required: false
+        type: number
+        default: 15
+
+permissions: {}
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+
+    env:
+      # A venv ignores user-site, so nothing here can read or write the host user's
+      # ~/.local. This belt is separate from the venv braces on purpose: a shared
+      # self-hosted runner's python sees $HOME/.local, ephemerality does NOT fix it (user
+      # site lives in $HOME, not the work dir), and a single step that slips and calls a
+      # non-venv python would otherwise mutate a human's dev environment. See
+      # self-hosted-runner/runbook.md gotchas #8 and #9.
+      PYTHONNOUSERSITE: "1"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: ${{ inputs.checkout_submodules }}
+          fetch-depth: ${{ inputs.fetch_depth }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: ${{ inputs.cache_dependency_path != '' && 'pip' || '' }}
+          cache-dependency-path: ${{ inputs.cache_dependency_path }}
+
+      - name: Create the job's venv and pin the job's paths
+        # Built under RUNNER_TEMP rather than in the workspace, for two reasons: the shared
+        # self-hosted runner reuses its work dir between runs, and a venv inside the
+        # checkout is a tree `--cov` could end up measuring.
+        #
+        # The three paths are exported here rather than declared in the job's `env:` block
+        # because the `runner` context does not exist at job level — only `github`,
+        # `inputs`, `matrix`, `needs`, `secrets`, `strategy` and `vars` do. RUNNER_TEMP is
+        # a plain path with no newline in it, so writing it to GITHUB_ENV is safe.
+        run: |
+          {
+            echo "VENV=$RUNNER_TEMP/python-tests-venv"
+            echo "ARGV_FILE=$RUNNER_TEMP/pytest-argv"
+            echo "COV_JSON=$RUNNER_TEMP/coverage.json"
+          } >> "$GITHUB_ENV"
+          python -m venv --clear "$RUNNER_TEMP/python-tests-venv"
+          "$RUNNER_TEMP/python-tests-venv/bin/python" -m pip install --quiet --upgrade pip
+          echo "$RUNNER_TEMP/python-tests-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        env:
+          INSTALL: ${{ inputs.install }}
+          PYTEST_VERSION: ${{ inputs.pytest_version }}
+          PYTEST_COV_VERSION: ${{ inputs.pytest_cov_version }}
+        run: |
+          if [ -n "$INSTALL" ]; then
+            # Word-split deliberately — `install` is a pip ARGUMENT LIST. `set -f` stops
+            # bash glob-expanding an extras spec like `.[dev]` against the working tree.
+            set -f
+            # shellcheck disable=SC2086
+            "$VENV/bin/pip" install $INSTALL
+            set +f
+          fi
+          if [ -n "$PYTEST_VERSION" ]; then
+            "$VENV/bin/pip" install "pytest==$PYTEST_VERSION"
+          fi
+          if [ -n "$PYTEST_COV_VERSION" ]; then
+            "$VENV/bin/pip" install "pytest-cov==$PYTEST_COV_VERSION"
+          fi
+
+      - name: Assert the test tooling is present
+        # A missing pytest would surface as "command not found" from the run step, which
+        # says nothing about which input to change.
+        env:
+          COVERAGE: ${{ inputs.coverage }}
+        run: |
+          if ! "$VENV/bin/python" -c "import pytest" 2>/dev/null; then
+            echo "::error::pytest is not installed. Add it to the \`install\` input (e.g. \`-e .[dev]\`) or set \`pytest_version\`."
+            exit 1
+          fi
+          if [ "$COVERAGE" != "none" ] && ! "$VENV/bin/python" -c "import pytest_cov" 2>/dev/null; then
+            echo "::error::coverage is '$COVERAGE' but pytest-cov is not installed. Add pytest-cov to the \`install\` input, or set \`pytest_cov_version\`, or set \`coverage: none\`."
+            exit 1
+          fi
+
+      - name: Resolve the pytest invocation
+        env:
+          COVERAGE: ${{ inputs.coverage }}
+          SOURCE_DIR: ${{ inputs.source_dir }}
+          TEST_PATH: ${{ inputs.test_path }}
+          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args }}
+        run: |
+          python3 - <<'PYEOF_RESOLVE'
+          # Builds pytest's argv from the inputs, and refuses to build one it cannot
+          # justify. Written to a file, one argument per line, so the run step can restore
+          # it with `mapfile` — no word-splitting, no globbing, and nothing that could turn
+          # an input into a second command.
+          import os
+          import re
+          import shlex
+          import sys
+
+          FLOOR = re.compile(r"^floor:(\d{1,3})$")
+
+
+          def die(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          coverage = os.environ["COVERAGE"].strip()
+          source_dir = os.environ.get("SOURCE_DIR", "")
+          test_path = os.environ.get("TEST_PATH", "")
+          extra_args = os.environ.get("PYTEST_EXTRA_ARGS", "")
+          argv_file = os.environ["ARGV_FILE"]
+          cov_json = os.environ["COV_JSON"]
+
+          # Fail closed. An unrecognised mode must never fall through to report-only: that
+          # would delete a floor a caller believed was enforced and still report success.
+          floor = None
+          if coverage == "none":
+              pass
+          elif coverage == "report":
+              pass
+          else:
+              match = FLOOR.match(coverage)
+              if not match:
+                  die(
+                      f"coverage: {coverage!r} is not a recognised posture. "
+                      "Use 'none', 'report', or 'floor:N' with N in 0..100."
+                  )
+              floor = int(match.group(1))
+              if floor > 100:
+                  die(f"coverage: floor:{floor} is not a percentage (N must be in 0..100).")
+
+          sources = shlex.split(source_dir)
+
+          if coverage == "none":
+              if sources:
+                  # Not merely redundant. A repo that sets a source dir believes it is being
+                  # measured; ignoring it quietly would leave that belief unchallenged.
+                  die(
+                      "coverage: none was requested but source_dir is set to "
+                      f"{source_dir!r}. Set coverage to 'report' or 'floor:N', or clear source_dir."
+                  )
+          else:
+              if not sources:
+                  die(f"coverage: {coverage} requires source_dir, which is empty.")
+              for source in sources:
+                  if not os.path.exists(source):
+                      # The pre-flight half of the dead-coverage guard. pytest-cov treats a
+                      # non-existent --cov target as a warning and exits 0, so without this
+                      # a typo here produces a green job that measured nothing at all.
+                      die(
+                          f"coverage source {source!r} does not exist in the checkout. "
+                          "It is relative to the repository root."
+                      )
+
+          argv = shlex.split(test_path) + shlex.split(extra_args)
+          if coverage != "none":
+              argv += [f"--cov={source}" for source in sources]
+              argv += ["--cov-report=term-missing", f"--cov-report=json:{cov_json}"]
+              if floor is not None:
+                  argv.append(f"--cov-fail-under={floor}")
+
+          # The argv file is line-delimited, so an argument containing a newline would be
+          # read back as two arguments.
+          for arg in argv:
+              if "\n" in arg or "\r" in arg:
+                  die(f"pytest argument {arg!r} contains a newline, which cannot be passed through.")
+
+          with open(argv_file, "w", encoding="utf-8") as handle:
+              handle.write("".join(f"{arg}\n" for arg in argv))
+
+          print(f"coverage posture: {coverage}")
+          print("pytest " + " ".join(shlex.quote(arg) for arg in argv))
+          PYEOF_RESOLVE
+
+      - name: Run pytest
+        env:
+          # sys.monitoring-based coverage (PEP 669, Python 3.12+). Measured on the control
+          # plane's suite: coverage's default C tracer took the run from 66s to 115s, while
+          # sysmon cost essentially nothing (64s) for a byte-identical report. On an
+          # interpreter older than 3.12 coverage emits a `no-sysmon` warning and falls back
+          # to its default core — slower, same numbers, never a failure.
+          COVERAGE_CORE: sysmon
+          # Derandomised hypothesis profile. A property test drawing fresh random inputs
+          # each run could fail a PR that an identical rerun would pass, and these jobs are
+          # merge gates. Repos without hypothesis never read it. Broader randomised
+          # exploration belongs in a local `dev` profile.
+          HYPOTHESIS_PROFILE: ci
+        run: |
+          mapfile -t ARGV < "$ARGV_FILE"
+          "$VENV/bin/pytest" "${ARGV[@]}"
+
+      - name: Assert coverage measured something
+        # The other half of the dead-coverage guard, and the reason this step is not folded
+        # into the one above: a source path can exist and still contribute no measured
+        # file (an empty directory, a tree with no importable module, a --cov target that
+        # nothing under test imports). pytest-cov reports that as a warning and exit 0.
+        if: ${{ inputs.coverage != 'none' }}
+        run: |
+          python3 - <<'PYEOF_CENSUS'
+          import json
+          import os
+          import sys
+
+          cov_json = os.environ["COV_JSON"]
+
+          if not os.path.exists(cov_json):
+              # pytest-cov writes no report at all when it collected no data, so an absent
+              # file is the loudest symptom of the quietest failure.
+              print(
+                  "::error::coverage produced no report — nothing was measured. Check that "
+                  "source_dir names the tree the tests import (it is relative to the "
+                  "repository root)."
+              )
+              sys.exit(1)
+
+          # Every read below is defensive about shape. This file is written by another
+          # tool, and a traceback here would fail the step with no ::error:: annotation —
+          # indistinguishable from an infrastructure problem, so it gets retried rather
+          # than fixed.
+          try:
+              with open(cov_json, encoding="utf-8") as handle:
+                  report = json.load(handle)
+          except (OSError, ValueError) as exc:
+              print(f"::error::coverage report at {cov_json} is unreadable ({exc}).")
+              sys.exit(1)
+
+          files = report.get("files") if isinstance(report, dict) else None
+          if not files:
+              print(
+                  "::error::coverage measured 0 files. source_dir exists but contributed "
+                  "nothing — check it names the tree the tests import."
+              )
+              sys.exit(1)
+
+          totals = report.get("totals")
+          try:
+              percent = f"{float(totals['percent_covered']):.2f}%"
+          except (KeyError, TypeError, ValueError):
+              percent = "unknown"
+          print(f"coverage measured {len(files)} file(s), {percent} of statements covered")
+          PYEOF_CENSUS

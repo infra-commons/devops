@@ -1,0 +1,5 @@
+# Artefacts of running the fixture suite locally (see docs/python-tests.md).
+__pycache__/
+.pytest_cache/
+.coverage
+coverage.json
