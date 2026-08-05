@@ -1,0 +1,196 @@
+name: Auto-assign pull requests (reusable)
+
+# Reusable: puts every new pull request on somebody's plate, mechanically.
+#
+# The problem this solves is not "assigning is tedious" — it is that an assignment
+# convention held only in an operator's head binds nothing. Whoever opens the PR next (a
+# person, an automation account, a scheduled job) has no way to know the convention exists,
+# and a PR that reaches nobody's queue looks exactly like one that reached it.
+#
+# Caller pattern:
+#   name: Auto-assign
+#   on:
+#     pull_request:
+#       types: [opened, ready_for_review]
+#   permissions: {}
+#   jobs:
+#     assign:
+#       uses: infra-commons/devops/.github/workflows/auto-assign-reusable.yml@<SHA>
+#
+# Resulting check name: "<caller_job_id> / assign". Do NOT make it a required check — it
+# has no opinion on whether the change is good, and a required check that can fail on a
+# GitHub API hiccup buys nothing.
+#
+# ── Who gets assigned ─────────────────────────────────────────────────────────────────
+#
+# In precedence order:
+#   1. the `assignee` input, when the caller sets one;
+#   2. the `PR_ASSIGNEE` repository or organisation variable;
+#   3. the pull request's author.
+#
+# The variable is the intended mechanism for a fixed reviewer. It exists because this
+# repository is PUBLIC and a login is a personal identifier: hardcoding one here, or in a
+# public caller, would put it in a public index. As a variable it is configuration, set
+# once per organisation and greppable through the API rather than through this file.
+#
+#   gh api -X PATCH /orgs/<org>/actions/variables/PR_ASSIGNEE -f name=PR_ASSIGNEE -f value=<login>
+#
+# Falling back to the author rather than to nothing keeps the workflow useful in an
+# organisation that never sets the variable: a PR still lands in its author's queue, which
+# is the behaviour most people expect from "assign my PRs".
+#
+# ── Why the verification step is not optional ─────────────────────────────────────────
+#
+# Measured against the live API, not assumed. Three ways to assign a login that cannot be
+# assigned, and only one of them tells you:
+#
+#   gh pr edit --add-assignee <nonexistent-login>   -> exit 1, loud GraphQL error
+#   gh api POST .../issues/N/assignees <nonexistent> -> exit 0, login silently dropped
+#   gh pr edit --add-assignee <real user, not a collaborator>
+#                                                    -> EXIT 0, prints the PR URL,
+#                                                       assignees unchanged
+#
+# The third is the realistic configuration error — a valid login that simply is not a
+# collaborator on this repository, which is what a mistyped or stale `PR_ASSIGNEE` looks
+# like. It produces a completely green job that assigned nobody, and a green auto-assign
+# job is indistinguishable from a working one until somebody notices their queue is empty.
+# So the assignment is read back and asserted, and the job fails when it did not take.
+
+on:
+  workflow_call:
+    inputs:
+      assignee:
+        description: >
+          Login to assign. Overrides the PR_ASSIGNEE variable. Leave empty (the default)
+          to use PR_ASSIGNEE, or the pull request's author when that is unset too.
+        required: false
+        type: string
+        default: ""
+      skip_actors:
+        description: >
+          Whitespace-separated actor logins whose pull requests are left unassigned.
+          Matched exactly, never as a substring. Defaults to Dependabot, whose PRs are
+          handled by the auto-merge path and would otherwise fill a queue with churn.
+        required: false
+        type: string
+        default: "dependabot[bot]"
+      overwrite:
+        description: >
+          Assign even when the pull request already has assignees. Off by default: a PR
+          somebody has deliberately assigned should stay where they put it.
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  assign:
+    name: assign
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Decide who to assign
+        id: decide
+        env:
+          INPUT_ASSIGNEE: ${{ inputs.assignee }}
+          VAR_ASSIGNEE: ${{ vars.PR_ASSIGNEE }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          SKIP_ACTORS: ${{ inputs.skip_actors }}
+          OVERWRITE: ${{ inputs.overwrite }}
+          CURRENT_ASSIGNEES: ${{ join(github.event.pull_request.assignees.*.login, ' ') }}
+          DECISION_FILE: ${{ runner.temp }}/assign-decision
+        run: |
+          python3 - <<'PYEOF_DECIDE'
+          # Resolves the target login and decides whether to act at all. Kept separate from
+          # the API call so the precedence rules can be tested without a live pull request.
+          import os
+          import sys
+
+
+          def die(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          author = os.environ.get("PR_AUTHOR", "").strip()
+          explicit = os.environ.get("INPUT_ASSIGNEE", "").strip()
+          variable = os.environ.get("VAR_ASSIGNEE", "").strip()
+          overwrite = os.environ.get("OVERWRITE", "false").strip().lower() == "true"
+          decision_file = os.environ["DECISION_FILE"]
+
+          # Exact matching, never substring: `in` against the raw string would make a user
+          # called `not-dependabot[bot]` match the skip list, and silently skipping a real
+          # contributor's PR is the failure nobody reports.
+          skip_actors = os.environ.get("SKIP_ACTORS", "").split()
+          current = os.environ.get("CURRENT_ASSIGNEES", "").split()
+
+          if not author:
+              # The workflow is only meaningful on a pull_request event. Reaching here means
+              # the caller wired a trigger whose payload has no pull request, and assigning
+              # nobody would look identical to a PR that needed no assignment.
+              die(
+                  "no pull request author in the event payload — this workflow must be "
+                  "called from a pull_request (or pull_request_target) trigger."
+              )
+
+          if author in skip_actors:
+              print(f"skip: {author} is in skip_actors")
+              open(decision_file, "w", encoding="utf-8").write("")
+              sys.exit(0)
+
+          if current and not overwrite:
+              print(f"skip: already assigned to {', '.join(current)} (set overwrite to change)")
+              open(decision_file, "w", encoding="utf-8").write("")
+              sys.exit(0)
+
+          if explicit:
+              target, source = explicit, "the assignee input"
+          elif variable:
+              target, source = variable, "the PR_ASSIGNEE variable"
+          else:
+              target, source = author, "the pull request author (PR_ASSIGNEE is unset)"
+
+          if target in current:
+              print(f"skip: already assigned to {target}")
+              open(decision_file, "w", encoding="utf-8").write("")
+              sys.exit(0)
+
+          print(f"assigning {target}, from {source}")
+          with open(decision_file, "w", encoding="utf-8") as handle:
+              handle.write(f"{target}\n")
+          PYEOF_DECIDE
+
+      - name: Assign, and verify the assignment took
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DECISION_FILE: ${{ runner.temp }}/assign-decision
+        run: |
+          target="$(cat "$DECISION_FILE")"
+          if [ -z "$target" ]; then
+            echo "nothing to do"
+            exit 0
+          fi
+
+          # `gh pr edit` exits 1 on a login that does not resolve at all, but exits 0 —
+          # printing the PR URL — on a login that resolves and simply is not assignable
+          # here. Its exit code therefore cannot be trusted as evidence on its own.
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --add-assignee "$target" || true
+
+          assignees="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json assignees \
+            --jq '[.assignees[].login] | join(" ")')"
+
+          for got in $assignees; do
+            if [ "$got" = "$target" ]; then
+              echo "assigned: $target"
+              exit 0
+            fi
+          done
+
+          echo "::error::assignment did not take — '$target' is not among the assignees (${assignees:-none}). The most likely cause is that '$target' is not a collaborator on $REPO, which the API drops silently. Check the PR_ASSIGNEE variable, or add the user to the repository."
+          exit 1
