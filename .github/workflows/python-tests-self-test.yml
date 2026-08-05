@@ -1,0 +1,189 @@
+name: Python tests reusable — self-test
+
+# python-tests-reusable.yml is a merge gate for eight repositories. A gate that cannot
+# fail is indistinguishable from one that passes, so this workflow's job is to make it
+# fail on purpose and check that it did.
+#
+# Three layers, because they catch different things:
+#
+#   unit          scripts/test_python_tests_reusable.py — negative controls over the two
+#                 programs lifted OUT OF the shipped workflow file. Fast, and covers every
+#                 rejection the reusable is supposed to make.
+#   e2e-*         the reusable, called for real against tests/fixtures/sample-project via a
+#                 local `uses:` so the working-tree version is what runs. These prove the
+#                 plumbing the unit layer cannot see: the venv, the install, pytest
+#                 actually executing, coverage actually measuring something.
+#   negative-controls
+#                 the three failures that only exist end-to-end. See its own header.
+#
+# The fixture is measured at 67% (see its README), which is why floor:50 is the satisfiable
+# floor and floor:99 the unsatisfiable one. Change the fixture and re-check both.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/python-tests-reusable.yml"
+      - ".github/workflows/python-tests-self-test.yml"
+      - "scripts/test_python_tests_reusable.py"
+      - "tests/fixtures/sample-project/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/python-tests-reusable.yml"
+      - ".github/workflows/python-tests-self-test.yml"
+      - "scripts/test_python_tests_reusable.py"
+      - "tests/fixtures/sample-project/**"
+
+concurrency:
+  group: python-tests-self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  unit:
+    name: Reusable negative controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the reusable's negative controls
+        # Stdlib-only, deliberately: this is the thing that decides whether a merge gate
+        # is sound, so it should not be able to break on a dependency resolution.
+        run: python3 scripts/test_python_tests_reusable.py
+
+  # ── The reusable, run for real ────────────────────────────────────────────────────
+  # `uses: ./…` resolves against this commit, so these exercise the working tree rather
+  # than whatever is on main.
+
+  e2e-report:
+    name: e2e report
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-tests-reusable.yml
+    with:
+      test_path: tests/fixtures/sample-project/tests
+      source_dir: tests/fixtures/sample-project/src
+      install: -r tests/fixtures/sample-project/requirements-dev.txt
+      coverage: report
+
+  e2e-floor-pass:
+    name: e2e satisfiable floor
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-tests-reusable.yml
+    with:
+      test_path: tests/fixtures/sample-project/tests
+      source_dir: tests/fixtures/sample-project/src
+      install: -r tests/fixtures/sample-project/requirements-dev.txt
+      coverage: floor:50
+
+  e2e-none:
+    name: e2e no coverage
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-tests-reusable.yml
+    with:
+      test_path: tests/fixtures/sample-project/tests
+      install: -r tests/fixtures/sample-project/requirements-dev.txt
+      coverage: none
+      pytest_args: -q
+
+  e2e-multi-source:
+    name: e2e two source roots
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-tests-reusable.yml
+    with:
+      test_path: tests/fixtures/sample-project/tests
+      source_dir: tests/fixtures/sample-project/src scripts
+      install: -r tests/fixtures/sample-project/requirements-dev.txt
+      coverage: report
+
+  negative-controls:
+    name: End-to-end negative controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    # Why this is a plain job and not three more `uses:` jobs with continue-on-error:
+    # GitHub does not allow `continue-on-error` on a job that calls a reusable workflow
+    # (only name / needs / if / permissions / concurrency / strategy / with / secrets are
+    # permitted there), so a must-fail call would simply fail this workflow. Driving the
+    # shipped programs directly keeps the guarantee that matters — they are lifted out of
+    # python-tests-reusable.yml, not re-implemented here, so they cannot drift away from
+    # what actually runs in the fleet.
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up the fixture's environment
+        run: |
+          python -m venv --clear "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --upgrade pip
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet -r tests/fixtures/sample-project/requirements-dev.txt
+          python3 scripts/test_python_tests_reusable.py --extract PYEOF_CENSUS > "$RUNNER_TEMP/census.py"
+
+      - name: An unsatisfiable floor must fail the run
+        id: floor
+        continue-on-error: true
+        run: |
+          "$RUNNER_TEMP/venv/bin/pytest" tests/fixtures/sample-project/tests -q \
+            --cov=tests/fixtures/sample-project/src \
+            --cov-report=term-missing --cov-fail-under=99
+
+      - name: A test path that collects nothing must fail the run
+        id: empty
+        continue-on-error: true
+        # The fixture's `empty/` holds no tests. pytest exits 5 on "no tests collected";
+        # this asserts the reusable does not swallow that into a green check.
+        run: '"$RUNNER_TEMP/venv/bin/pytest" tests/fixtures/sample-project/empty -q'
+
+      # THE end-to-end negative control, and the one no other layer can produce. It is two
+      # steps rather than one because they must be able to fail differently: if the setup
+      # step's premise stopped holding, a single combined step would still go red and the
+      # assertion below would read that as the census doing its job.
+      - name: Reproduce the silent-green case (pytest measures nothing, exits 0)
+        run: |
+          # `empty/` exists, so the resolver's pre-flight check is satisfied. pytest then
+          # runs clean and exits ZERO having measured not one file, writing no report at
+          # all. This step FAILING means the case no longer reproduces — which would make
+          # the control below meaningless, so it is asserted here rather than assumed.
+          "$RUNNER_TEMP/venv/bin/pytest" tests/fixtures/sample-project/tests -q \
+            --cov=tests/fixtures/sample-project/empty \
+            --cov-report=term-missing --cov-report=json:"$RUNNER_TEMP/dead.json"
+          if [ -s "$RUNNER_TEMP/dead.json" ]; then
+            echo "::error::expected pytest-cov to write no report when it measured nothing, but $RUNNER_TEMP/dead.json exists — re-check what the census is being asked to catch."
+            exit 1
+          fi
+
+      - name: Coverage that measured nothing must fail the census
+        id: census
+        continue-on-error: true
+        run: COV_JSON="$RUNNER_TEMP/dead.json" python3 "$RUNNER_TEMP/census.py"
+
+      - name: Assert every control actually went red
+        env:
+          FLOOR: ${{ steps.floor.outcome }}
+          EMPTY: ${{ steps.empty.outcome }}
+          CENSUS: ${{ steps.census.outcome }}
+        run: |
+          rc=0
+          for control in FLOOR EMPTY CENSUS; do
+            outcome="${!control}"
+            if [ "$outcome" != "failure" ]; then
+              echo "::error::negative control $control did not fail (outcome: $outcome). The guard it stands for is not holding, or the control no longer reproduces the condition."
+              rc=1
+            else
+              echo "ok: $control failed as required"
+            fi
+          done
+          exit $rc
