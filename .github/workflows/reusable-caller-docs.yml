@@ -1,0 +1,43 @@
+name: Reusable caller docs
+
+# Checks that every published reusable's DOCUMENTED caller pattern would actually
+# run, by comparing it against the permissions the reusable's own jobs request.
+#
+# This exists because the per-reusable self-tests structurally cannot catch this
+# class of defect. They call each workflow with `uses: ./…`, from inside this
+# repository, where the permission ceiling is whatever the self-test grants —
+# never whatever an adopter's copied snippet grants. So the executed form and the
+# documented form can drift apart indefinitely while every check stays green, and
+# only the documented form is what an adopter reads.
+#
+# It has happened twice from that blind spot: infra-commons/devops#18 and
+# infra-commons/marketing-engine#17. Both times the symptom was a
+# `startup_failure`, which produces NO check-run at all rather than a red one —
+# so the adopter sees a missing check and reads it as "not wired up yet" instead
+# of "broken", while the thing the reusable exists to guarantee quietly does not
+# happen.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/*-reusable.yml"
+      - "scripts/test_reusable_caller_docs.py"
+      - ".github/workflows/reusable-caller-docs.yml"
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  check:
+    name: Documented caller patterns
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check every documented caller pattern grants what it needs
+        # Stdlib-only, like the other scripts here: it installs nothing.
+        run: python3 scripts/test_reusable_caller_docs.py
