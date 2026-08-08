@@ -13,6 +13,8 @@ name: Python tests + coverage (reusable)
 #   jobs:
 #     test:
 #       uses: infra-commons/devops/.github/workflows/python-tests-reusable.yml@<SHA>
+#       permissions:
+#         contents: read     # a called workflow cannot hold more than its caller grants
 #       with:
 #         source_dir: src
 #         test_path: tests

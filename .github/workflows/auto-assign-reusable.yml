@@ -16,6 +16,15 @@ name: Auto-assign pull requests (reusable)
 #   jobs:
 #     assign:
 #       uses: infra-commons/devops/.github/workflows/auto-assign-reusable.yml@<SHA>
+#       permissions:
+#         pull-requests: write
+#
+# The job-level `permissions:` is NOT optional and is not a duplicate of the `{}`
+# above it. A called workflow may never hold more permission than its caller grants,
+# and workflow-level `permissions: {}` grants the calling job nothing — so omitting
+# the block makes the run fail at STARTUP. A startup_failure produces no check-run at
+# all, not a red one, so the symptom is a missing check that reads as 'not wired up
+# yet' while every PR quietly reaches nobody's queue. See infra-commons/devops#18.
 #
 # Resulting check name: "<caller_job_id> / assign". Do NOT make it a required check — it
 # has no opinion on whether the change is good, and a required check that can fail on a

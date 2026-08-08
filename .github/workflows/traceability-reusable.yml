@@ -6,9 +6,15 @@ name: Traceability check (reusable)
 #   jobs:
 #     traceability:
 #       uses: infra-commons/devops/.github/workflows/traceability-reusable.yml@<SHA> # pin to an immutable SHA
+#       permissions:
+#         contents: read
+#         pull-requests: write
 #       secrets: inherit          # passes ANTHROPIC_API_KEY
 #
-# The caller grants nothing extra; this workflow declares its own permissions.
+# The caller MUST grant the two permissions above. This workflow declaring them on its
+# own job is necessary but not sufficient: a called workflow may never hold more
+# permission than its caller, so a caller that grants nothing caps this at nothing and
+# the run fails at startup — producing no check-run at all rather than a red one.
 # Resulting check: `<caller-job-id> / traceability`. Advisory only — do NOT make
 # it a required status check; it posts a PR comment and never fails the build on
 # findings.
