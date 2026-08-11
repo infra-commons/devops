@@ -300,6 +300,15 @@ jobs:
           TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
           SOLUTION_NAME: ${{ needs.build.outputs.solution_name }}
         run: |
+          # EXPRESSION-FREE BY DESIGN. This block is safe at its current size only
+          # because it contains no GitHub Actions interpolation marker (dollar
+          # followed by two braces) anywhere in its text — that marker is what
+          # makes GitHub compile a `run:` block as a single expression, capped at
+          # 21,000 characters, and this block is already most of the way there.
+          # One character reintroducing that marker moves it from "large but
+          # fine" to "does not compile" with nothing in between. Route any future
+          # per-client value through `env:` above instead of splicing it in here.
+          # Guarded by scripts/test_azure_deploy_reusable.py.
           python3 << 'EOF'
           import json, os, re, sys
           import yaml
