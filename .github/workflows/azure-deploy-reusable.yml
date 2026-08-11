@@ -1,0 +1,200 @@
+name: Deploy — Azure Container Apps (reusable)
+
+# Canonical Azure/bicep deploy pipeline (build image -> load per-client matrix ->
+# bootstrap + deploy). Extracted from the ~4,000-line `reusable-deploy.yml` that
+# rolliq-com/solution-template and rolliq-com/solution-recruitment-reference-check
+# each carried independently — the single largest fork between those two repos,
+# every improvement made twice and in practice made once.
+#
+# LANDING IN LAYERS, not as one PR: 2,400+ differing lines between the two source
+# files does not fit any single reviewable diff. This file currently carries only
+# the `build` job (layer 1 of the sequence below); `load-matrix` and `deploy`
+# follow in their own PRs, then the caller-specific hardening rrc has and the
+# template does not lands as opt-in `input:` feature flags, one per PR. A reusable
+# workflow with only a `build` job is valid YAML but not yet a usable deploy
+# path — do not treat this file's mere existence as evidence the extraction is
+# done; the definition of done is a green rolliq-test staging AND promote on the
+# fully-landed file, driven by the calling org.
+#
+# One thing that will NOT move here: rrc's Layer-2 staging E2E gate
+# (Zoom -> LLM -> SharePoint delivery) is product integration testing, not a
+# deploy-pipeline concern. It stays a follow-on job in rrc's own caller after it
+# calls this reusable — rrc's caller will never be as thin as the template's, and
+# that is correct, not a parity gap to close later.
+#
+# KNOWN PREREQUISITE, not yet done: this job's `azure/login` step requires
+# `azure/login@*` in infra-commons' org Actions allow-list
+# (org_actions_policy.orgs.infra-commons in the sharedinfra devops-manifest —
+# currently only rolliq-com's extra_patterns carries it). Actions used inside a
+# reusable are governed by the org that HOSTS the workflow file, not the org that
+# calls it, so this is an infra-commons org-admin change, separate from any PR
+# here, and it blocks a real caller's run rather than blocking this file merging.
+#
+# Caller pattern (once enough layers have landed for an org to adopt):
+#   jobs:
+#     deploy:
+#       permissions:
+#         contents: read
+#         id-token: write   # a called workflow cannot hold more than its caller grants
+#       uses: infra-commons/devops/.github/workflows/azure-deploy-reusable.yml@<SHA>
+#       with:
+#         allowed_class: test
+#         client_slug: ${{ inputs.client_slug }}
+#       secrets:
+#         AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+#         AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+#         AZURE_MANAGEMENT_SUBSCRIPTION_ID: ${{ secrets.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}
+#         ACR_NAME: ${{ secrets.ACR_NAME }}
+#         ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+#
+# Resulting check name: "<caller_job_id> / build" until `deploy` lands, then
+# "<caller_job_id> / deploy" is the one to add to required_status_checks.
+#
+# Self-test scope, stated up front so a green self-test is never mistaken for a
+# green rolliq-test promote: this repo holds no Azure credentials, so nothing
+# here can prove a real bicep apply. What a self-test in this repo CAN prove —
+# embedded-script correctness, the expression-length guard, the permissions/
+# caller-doc contract above — lands alongside the `deploy` job (layer 3), once
+# there is a stable target to test against. The live end-to-end proof is DoD
+# item 2 of the extraction issue and is the calling org's to run.
+
+on:
+  workflow_call:
+    inputs:
+      client_slug:
+        description: "Deploy a single client only (blank = all clients of allowed_class)."
+        type: string
+        required: false
+        default: ""
+      allowed_class:
+        description: "Only deploy clients whose environment_class equals this ('production' or 'test'). The matrix (layer 2) refuses any client of the other class."
+        type: string
+        required: true
+      target_environment:
+        description: "Which environment tier to deploy ('staging' or 'prod'). Defaults to 'prod'."
+        type: string
+        required: false
+        default: "prod"
+      image_ref:
+        description: "Registry-relative image reference (name@sha256:digest) to PROMOTE instead of rebuilding. Empty = build from the current SHA."
+        type: string
+        required: false
+        default: ""
+      mode:
+        description: "'deploy' (default) runs the full build+deploy. 'onboard-identities' runs only the early identity-provisioning path and skips the image build entirely."
+        type: string
+        required: false
+        default: "deploy"
+    outputs:
+      image_digest:
+        description: "Registry-relative immutable digest ('sha256:<64 hex>') of the image THIS run built, empty on the promote path. Callers must use it instead of resolving a mutable tag, which has no client component and is overwritten by the last build of that commit."
+        value: ${{ jobs.build.outputs.image_digest }}
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_MANAGEMENT_SUBSCRIPTION_ID:
+        required: true
+      ACR_NAME:
+        required: true
+      ACR_LOGIN_SERVER:
+        required: true
+
+permissions: {}
+
+jobs:
+  # ── 1. Build and push container image ──────────────────────────────────────
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    outputs:
+      solution_name: ${{ steps.solution-name.outputs.name }}
+      # Registry-relative on purpose: GitHub silently drops any job output whose
+      # value contains a secret, so prefixing the ACR login server here would
+      # make the output arrive empty downstream. The server is prefixed at the
+      # point of use instead.
+      image_digest: ${{ steps.build-push.outputs.digest }}
+    permissions:
+      contents: read
+      id-token: write   # OIDC login to the ACR subscription
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show deployment target
+        env:
+          ALLOWED_CLASS: ${{ inputs.allowed_class }}
+          CLIENT_SLUG: ${{ inputs.client_slug }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+        run: |
+          echo "=== Deploy — class=${ALLOWED_CLASS}, tier=${TARGET_ENVIRONMENT}, client=${CLIENT_SLUG:-ALL} ==="
+          echo "  SHA:    $GITHUB_SHA"
+          echo "  Branch: $GITHUB_REF_NAME"
+          git log -1 --format="  Commit: %s (%an, %ar)"
+
+      - name: Read solution name
+        id: solution-name
+        run: |
+          NAME=$(python3 -c "
+          import re, sys, yaml
+          n = yaml.safe_load(open('SOLUTION.yaml'))['name']
+          if not re.match(r'^[a-z0-9][a-z0-9-]{0,62}$', str(n)):
+              sys.exit(f'SOLUTION.yaml name {n!r} must be lowercase alphanumeric with hyphens only')
+          print(n)
+          ")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # Promotion path: when image_ref is set the artifact already exists in the
+      # central ACR (built once at staging). Skip the rebuild entirely so the
+      # exact same bytes flow through staging and prod.
+      - name: Skip build (promoting a pinned image)
+        if: ${{ inputs.image_ref != '' }}
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+        run: echo "Promoting pinned image ${IMAGE_REF} — build skipped."
+
+      # Authenticate to the management subscription (hosts the central ACR).
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3
+        if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
+        run: az acr login --name "${{ secrets.ACR_NAME }}"
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
+
+      - name: Stamp build metadata
+        if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
+        id: build-meta
+        run: echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # `id` is load-bearing, not cosmetic: the job's image_digest output reads
+      # steps.build-push.outputs.digest, which is how every downstream consumer
+      # learns what THIS run built without re-resolving a mutable tag. Removing
+      # the id silently empties that output.
+      - name: Build and push
+        id: build-push
+        if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.ACR_LOGIN_SERVER }}/${{ steps.solution-name.outputs.name }}:sha-${{ github.sha }}
+          # Bake build provenance so the image self-reports its source commit via
+          # GET /version, independent of the registry tag pointing at it. A
+          # single digest can carry multiple commit-SHA tags (byte-identical /
+          # cached builds dedup to one digest), so a newer tag can alias onto an
+          # older digest and mask a stale deploy. A solution whose Dockerfile
+          # declares matching `ARG GIT_SHA` / `ARG BUILD_TIME` surfaces these;
+          # one that ignores them is unaffected (unused build-args only warn).
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ steps.build-meta.outputs.built_at }}
+          cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ steps.solution-name.outputs.name }}:cache
+          cache-to: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ steps.solution-name.outputs.name }}:cache,mode=max
