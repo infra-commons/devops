@@ -7,14 +7,22 @@ name: Deploy — Azure Container Apps (reusable)
 # every improvement made twice and in practice made once.
 #
 # LANDING IN LAYERS, not as one PR: 2,400+ differing lines between the two source
-# files does not fit any single reviewable diff. This file currently carries only
-# the `build` job (layer 1 of the sequence below); `load-matrix` and `deploy`
-# follow in their own PRs, then the caller-specific hardening rrc has and the
-# template does not lands as opt-in `input:` feature flags, one per PR. A reusable
-# workflow with only a `build` job is valid YAML but not yet a usable deploy
-# path — do not treat this file's mere existence as evidence the extraction is
-# done; the definition of done is a green rolliq-test staging AND promote on the
-# fully-landed file, driven by the calling org.
+# files does not fit any single reviewable diff. This file currently carries the
+# `build` and `load-matrix` jobs (layers 1-2 of the sequence below); `deploy`
+# follows in its own PR, then the caller-specific hardening rrc has and the
+# template does not lands as opt-in `input:` feature flags, one per PR. A
+# reusable workflow with no `deploy` job is valid YAML but not yet a usable
+# deploy path — do not treat this file's mere existence as evidence the
+# extraction is done; the definition of done is a green rolliq-test staging AND
+# promote on the fully-landed file, driven by the calling org.
+#
+# CONTRACT GROWTH, layer by layer, stated explicitly rather than left implicit:
+# layer 1 (build) declared client_slug, allowed_class, target_environment,
+# image_ref, mode, image_digest, and 5 secrets. Layer 2 (load-matrix) needed
+# exactly one addition: secrets.CLIENTS_CONFIG_TOKEN (cross-repo checkout of
+# rolliq-com/clients-config). No new `inputs:`/`outputs:` — load-matrix consumes
+# inputs layer 1 already declared and exposes its `matrix` output only to the
+# `deploy` job internally via `needs:`, not through `workflow_call.outputs`.
 #
 # One thing that will NOT move here: rrc's Layer-2 staging E2E gate
 # (Zoom -> LLM -> SharePoint delivery) is product integration testing, not a
@@ -22,13 +30,14 @@ name: Deploy — Azure Container Apps (reusable)
 # calls this reusable — rrc's caller will never be as thin as the template's, and
 # that is correct, not a parity gap to close later.
 #
-# KNOWN PREREQUISITE, not yet done: this job's `azure/login` step requires
+# KNOWN PREREQUISITE, not yet done: the `build` job's `azure/login` step requires
 # `azure/login@*` in infra-commons' org Actions allow-list
 # (org_actions_policy.orgs.infra-commons in the sharedinfra devops-manifest —
 # currently only rolliq-com's extra_patterns carries it). Actions used inside a
 # reusable are governed by the org that HOSTS the workflow file, not the org that
 # calls it, so this is an infra-commons org-admin change, separate from any PR
 # here, and it blocks a real caller's run rather than blocking this file merging.
+# Tracked as infra-commons/meta#583.
 #
 # Caller pattern (once enough layers have landed for an org to adopt):
 #   jobs:
@@ -99,6 +108,8 @@ on:
       ACR_NAME:
         required: true
       ACR_LOGIN_SERVER:
+        required: true
+      CLIENTS_CONFIG_TOKEN:
         required: true
 
 permissions: {}
@@ -198,3 +209,346 @@ jobs:
             BUILD_TIME=${{ steps.build-meta.outputs.built_at }}
           cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ steps.solution-name.outputs.name }}:cache
           cache-to: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ steps.solution-name.outputs.name }}:cache,mode=max
+
+  # ── 2. Build deployment matrix from clients-config (one tier) ──────────────
+  load-matrix:
+    name: Load client matrix
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Check out clients-config as a sibling directory.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rolliq-com/clients-config
+          token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+          path: clients-config
+
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+
+      # Consumer-side backstop: validate the checked-out clients-config against its
+      # own schema before we trust it to build the deploy matrix. Fails closed on
+      # schema-invalid YAML so a bad config can never reach a deploy (clients-config's
+      # own PR check is authoritative; this guards the exact commit we deploy from).
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+
+      - name: Validate clients-config schema (fail closed)
+        working-directory: clients-config
+        run: bash scripts/validate-all.sh
+
+      - name: Build deployment matrix
+        id: build-matrix
+        env:
+          ONLY_CLIENT: ${{ inputs.client_slug }}
+          ALLOWED_CLASS: ${{ inputs.allowed_class }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+          SOLUTION_NAME: ${{ needs.build.outputs.solution_name }}
+        run: |
+          python3 << 'EOF'
+          import json, os, re, sys
+          import yaml
+          from pathlib import Path
+
+          SLUG_RE   = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$')
+          UUID_RE   = re.compile(
+              r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+              re.IGNORECASE,
+          )
+          REGION_RE = re.compile(r'^[a-z][a-z0-9]{1,29}$')
+          ENV_RE    = re.compile(r'^[a-z][a-z0-9-]{0,29}$')
+          TIER_RE   = re.compile(r'^[a-z][a-z0-9-]{0,29}$')
+          LLM_PROVIDER_RE = re.compile(r'^(anthropic|foundry|azure_openai)$')
+          # Providers a Mid (zero_retention) deployment may run on. Azure OpenAI on
+          # the customer's own Foundry only: its no-logging exemption and standard
+          # no-training terms are what the Mid claim actually rests on. 'foundry'
+          # (client_owned custody) is the Enterprise model, not a Mid endpoint.
+          #
+          # 'anthropic' was in this set and is not any more. Standard Anthropic API
+          # terms retain inputs for up to ~30 days absent a contracted zero-data-
+          # retention arrangement, and none is on record for Rolliq's account, so
+          # designating it here made the gate assert a claim nobody had signed -- on
+          # the provider that was also the default, in the config a customer signs a
+          # DPA schedule against. Re-add it only against a contracted arrangement,
+          # and update the Mid DPA schedule wording in the same change.
+          # See rolliq-com/planning product/product-direction-and-tiering.md and
+          # solution-recruitment-reference-check docs/decisions/0010-azure-openai-for-mid.md.
+          ZDR_PROVIDERS   = {"azure_openai"}
+
+          solution_name = os.environ["SOLUTION_NAME"]
+          only_client = os.environ.get("ONLY_CLIENT", "").strip()
+          if only_client and not SLUG_RE.match(only_client):
+              sys.exit(f"ERROR: ONLY_CLIENT {only_client!r} is not a valid client slug (must match ^[A-Za-z0-9][A-Za-z0-9_-]{{0,62}}$)")
+
+          # The calling entry point sets allowed_class. We deploy ONLY clients whose
+          # environment_class matches — the production entry point physically cannot
+          # deploy a test client and vice versa. Hard guardrail, not just a label.
+          allowed_class = os.environ.get("ALLOWED_CLASS", "").strip()
+          if allowed_class not in ("production", "test"):
+              sys.exit(f"ERROR: allowed_class {allowed_class!r} must be 'production' or 'test'")
+
+          # Which environment tier to deploy (staging|prod). Only environments a
+          # client actually lists in enabled_environments are eligible.
+          target_environment = os.environ.get("TARGET_ENVIRONMENT", "prod").strip() or "prod"
+          if not ENV_RE.match(target_environment):
+              sys.exit(f"ERROR: target_environment {target_environment!r} contains invalid characters")
+
+          entries = []
+          for config_file in sorted(Path("clients-config/clients").glob("*.yaml")):
+              if config_file.name.startswith("_"):
+                  continue
+              try:
+                  cfg = yaml.safe_load(config_file.read_text())
+              except Exception as exc:
+                  print(f"WARNING: skipping {config_file}: {exc}", file=sys.stderr)
+                  continue
+
+              slug = str(cfg.get("client_slug", ""))
+              if not SLUG_RE.match(slug):
+                  print(f"WARNING: skipping {config_file.name} — client_slug {slug!r} contains invalid characters", file=sys.stderr)
+                  continue
+              if cfg.get("status", "active") not in ("active", "paused"):
+                  continue
+              if only_client and slug != only_client:
+                  continue
+
+              # environment_class guard. Absent → 'production' (fail-safe: an
+              # unclassified client is treated as the most-guarded class).
+              env_class = str(cfg.get("environment_class", "production"))
+              if env_class not in ("production", "test"):
+                  print(f"WARNING: skipping {slug!r} — environment_class {env_class!r} must be 'production' or 'test'", file=sys.stderr)
+                  continue
+              if env_class != allowed_class:
+                  if only_client and slug == only_client:
+                      # An explicit dispatch from the wrong entry point must fail
+                      # loudly, not silently no-op.
+                      sys.exit(
+                          f"ERROR: client {slug!r} is environment_class '{env_class}', but this is the "
+                          f"'{allowed_class}' deploy workflow. Deploy it via the '{env_class}' entry point."
+                      )
+                  continue
+
+              deployment = cfg.get("deployment", {})
+              azure = deployment.get("azure", {})
+              subscription_id = str(azure.get("subscription_id", ""))
+              if not UUID_RE.match(subscription_id):
+                  print(f"WARNING: skipping {slug!r} — subscription_id is not a valid UUID", file=sys.stderr)
+                  continue
+              region = str(azure.get("primary_region", "australiaeast"))
+              if not REGION_RE.match(region):
+                  print(f"WARNING: skipping {slug!r} — primary_region {region!r} contains invalid characters", file=sys.stderr)
+                  continue
+
+              # Deployment model (topology axis). client_owned is the production
+              # norm: it runs in the CUSTOMER's own tenant (customer-tenant Terraform
+              # state backend + resource-provider registration bootstrapped by the
+              # deploy job via the platform-iac composite actions, cross-tenant OIDC,
+              # and a customer-tenant ACR the image is imported into). rolliq_managed
+              # is Rolliq-internal environments only (rolliq-test / sandbox / demos):
+              # it runs in a Rolliq subscription and pulls from Rolliq's central ACR
+              # (cross-subscription AcrPull, same tenant), and never holds customer
+              # PII. Both are provisioned by this template. The absent-model fallback
+              # is client_owned (fail-safe: a client_owned client with no tenant_id
+              # is skipped below, not silently landed in Rolliq's tenant). See
+              # docs/decisions/0007 and platform-iac ADR-0005.
+              model = str(deployment.get("model", "client_owned"))
+              if model not in ("rolliq_managed", "client_owned"):
+                  print(f"WARNING: skipping {slug!r} — deployment.model {model!r} must be rolliq_managed or client_owned", file=sys.stderr)
+                  continue
+
+              # client_owned authenticates into the customer's OWN tenant, so a real
+              # tenant_id is mandatory (rolliq_managed uses Rolliq's tenant from the
+              # repo secret, so tenant_id may be blank there).
+              tenant_id = str(azure.get("tenant_id", ""))
+              if model == "client_owned" and not UUID_RE.match(tenant_id):
+                  msg = f"client {slug!r} is client_owned but has no valid azure.tenant_id"
+                  if only_client and slug == only_client:
+                      sys.exit(f"ERROR: {msg}")
+                  print(f"WARNING: skipping {slug!r} — {msg}", file=sys.stderr)
+                  continue
+
+              # Operations axis (decoupled from topology). Declarative pass-through
+              # only: surfaced as a resource tag by Terraform, no deploy path branches
+              # on it. Defaults to rolliq_operated. See docs/decisions/0007.
+              operations = str(cfg.get("operations", "rolliq_operated"))
+              if operations not in ("rolliq_operated", "self_operated"):
+                  print(f"WARNING: skipping {slug!r} — operations {operations!r} must be rolliq_operated or self_operated", file=sys.stderr)
+                  continue
+
+              for sol in cfg.get("solutions", []):
+                  if sol.get("name") != solution_name:
+                      continue
+                  if not sol.get("enabled", False):
+                      continue
+
+                  tier = str(sol.get("tier", "standard"))
+                  if not TIER_RE.match(tier):
+                      print(f"WARNING: skipping {slug!r} — tier {tier!r} contains invalid characters", file=sys.stderr)
+                      continue
+
+                  enabled_envs = [str(e) for e in sol.get("enabled_environments", ["prod"])]
+                  if target_environment not in enabled_envs:
+                      # This client does not run the requested tier. Silently skip on
+                      # an ALL-clients dispatch; hard-fail an explicit single-client
+                      # dispatch so a typo/misroute is loud, not a silent no-op.
+                      if only_client and slug == only_client:
+                          sys.exit(
+                              f"ERROR: client {slug!r} does not enable environment '{target_environment}' "
+                              f"(enabled_environments={enabled_envs}). Add the tier in clients-config, "
+                              f"or deploy one of its enabled environments."
+                          )
+                      continue
+
+                  # ── Zero-retention (Mid tier) derivation + promote gate ──────────
+                  # Per-client posture read from the solution's config_overrides. Only
+                  # the keys the zero-retention lock needs are derived here; a fuller
+                  # convergence with a per-solution config surface is out of scope for
+                  # the zero-retention spine port.
+                  sol_config = sol.get("config_overrides", {})
+                  # Delivery target: under Mid, output lands ONLY in the client's own
+                  # SharePoint, so the site id is what gives "we keep nothing" somewhere
+                  # to deliver. Empty is a gate failure for a production-class Mid deploy.
+                  sharepoint_site_id = str(sol_config.get("sharepoint_site_id", ""))
+                  # LLM provider drives the ZDR check below. Default azure_openai: it
+                  # is the only provider a Mid deployment may run on, and a dedicated
+                  # Foundry per customer gives per-customer spend attribution that a
+                  # shared org API key cannot. Validated to the permitted set.
+                  llm_provider = str(sol_config.get("llm_provider", "azure_openai"))
+                  if not LLM_PROVIDER_RE.match(llm_provider):
+                      print(f"WARNING: skipping {slug!r} — llm_provider {llm_provider!r} must be 'anthropic', 'foundry', or 'azure_openai'", file=sys.stderr)
+                      continue
+                  # Persist PII document tables. Default off → only the PII-free cost
+                  # ledger (llm_calls) rests. Coerce explicitly: bool() of a non-empty
+                  # string is always True, so a YAML "false"/"no"/"0" must NOT silently
+                  # enable persistence. Fail closed — only recognised truthy values on.
+                  _persist_raw = sol_config.get("persist_documents", False)
+                  if isinstance(_persist_raw, str):
+                      _persist_on = _persist_raw.strip().lower() in ("true", "yes", "1", "on")
+                  else:
+                      _persist_on = bool(_persist_raw)
+                  persist_documents = "true" if _persist_on else "false"
+                  # Mid zero-retention posture. Default TRUE (Rolliq keeps nothing). The
+                  # safe default is ON, so the coercion inverts — only an explicit
+                  # false-y value opts OUT into Enterprise custody; anything unrecognised
+                  # collapses to the retentive-safe Mid=true. Passed to Terraform as
+                  # zero_retention (thence ZERO_RETENTION to the app).
+                  _zr_raw = sol_config.get("zero_retention", True)
+                  if isinstance(_zr_raw, str):
+                      _zr_on = _zr_raw.strip().lower() not in ("false", "no", "0", "off")
+                  else:
+                      _zr_on = bool(_zr_raw)
+                  zero_retention = "true" if _zr_on else "false"
+                  # LLM model-ID pins (per alias). Claude IDs by default; an azure_openai
+                  # client overrides these with its Azure OpenAI deployment names (e.g. gpt-5).
+                  llm_model_sonnet = str(sol_config.get("llm_model_sonnet", "")) or "claude-sonnet-4-6"
+                  llm_model_haiku = str(sol_config.get("llm_model_haiku", "")) or "claude-haiku-4-5-20251001"
+                  llm_model_opus = str(sol_config.get("llm_model_opus", "")) or "claude-opus-4-7"
+                  # Azure OpenAI data-plane API version (azure_openai only; harmless otherwise).
+                  azure_openai_api_version = str(sol_config.get("azure_openai_api_version", "")) or "2024-10-21"
+                  # azure_openai Foundry wiring. azure_foundry_endpoint: the real endpoint
+                  # seeded into Key Vault at deploy (empty → the regional default).
+                  # foundry_account_id: client_owned only — the customer-tenant Foundry the
+                  # runtime UAMI is granted Cognitive Services OpenAI User on.
+                  azure_foundry_endpoint = str(sol_config.get("azure_foundry_endpoint", ""))
+                  foundry_account_id = str(sol_config.get("foundry_account_id", ""))
+                  # Per-client branding channel. Each is a '<container>/<blob>' reference
+                  # into the solution's client-branding storage container; empty renders the
+                  # neutral/unbranded default. Non-PII brand artwork, uploaded from
+                  # clients-config by the deploy's branding-asset step. Passed through
+                  # unchanged (identical across staging and prod).
+                  candidate_summary_style_blob = str(sol_config.get("candidate_summary_style_blob", ""))
+                  client_logo_blob = str(sol_config.get("client_logo_blob", ""))
+                  reference_check_template_blob = str(sol_config.get("reference_check_template_blob", ""))
+                  client_theme_blob = str(sol_config.get("client_theme_blob", ""))
+                  # provision_foundry: create a DEDICATED Foundry in-deploy instead of
+                  # referencing a pre-existing one. Mid-aware DEFAULT (platform-iac#296):
+                  # when the key is absent, a Mid deployment (rolliq_managed + zero_retention)
+                  # on azure_openai defaults it ON so GPT inference isn't commingled on the
+                  # shared platform Foundry. A no-op for the default anthropic path. Explicit
+                  # config always wins; fail-closed string/bool coercion otherwise.
+                  _provf_raw = sol_config.get("provision_foundry", None)
+                  if _provf_raw is None:
+                      _provf_on = (model == "rolliq_managed" and _zr_on and llm_provider == "azure_openai")
+                  elif isinstance(_provf_raw, str):
+                      _provf_on = _provf_raw.strip().lower() in ("true", "yes", "1", "on")
+                  else:
+                      _provf_on = bool(_provf_raw)
+                  provision_foundry = "true" if _provf_on else "false"
+                  # Zero-retention promote gate. A Mid deployment (zero_retention=true,
+                  # the default) keeps NOTHING Rolliq-side, so it may only ship when:
+                  # (a) document persistence is off, (b) a delivery target (SharePoint
+                  # site) is configured — the only place output can land, and (c) the
+                  # LLM provider is a ZDR-designated endpoint. Hard-fail (not skip) for a
+                  # production-class client; Enterprise (zero_retention=false) and
+                  # test-class clients are exempt. The app also enforces (a) at boot via
+                  # _enforce_zero_retention; this stops a broken Mid deploy at promote time.
+                  if _zr_on and env_class == "production":
+                      _zr_errs = []
+                      if _persist_on:
+                          _zr_errs.append("persist_documents is true (a Mid deploy retains nothing — it must be false)")
+                      if not sharepoint_site_id:
+                          _zr_errs.append("sharepoint_site_id is empty (Mid delivers only to the client's SharePoint — no site means nowhere for output to land)")
+                      if llm_provider not in ZDR_PROVIDERS:
+                          _zr_errs.append(f"llm_provider {llm_provider!r} is not a ZDR-designated endpoint (must be one of {sorted(ZDR_PROVIDERS)})")
+                      if _zr_errs:
+                          sys.exit(
+                              f"ERROR: client {slug!r} is a Mid (zero_retention) deployment but: "
+                              + "; ".join(_zr_errs)
+                              + ". A Mid deployment must keep nothing Rolliq-side — fix the config in "
+                              "clients-config, or set zero_retention: false to run it as an Enterprise "
+                              "(custody) deployment."
+                          )
+
+                  env = target_environment
+                  # client_owned uses a per-client GitHub Environment (<slug>-<env>)
+                  # whose scoped AZURE_CLIENT_ID/AZURE_TENANT_ID resolve the OIDC
+                  # subject to the customer tenant; rolliq_managed uses the shared
+                  # tier environment (staging/prod) with Rolliq's repo-level creds.
+                  deploy_environment = f"{slug}-{env}" if model == "client_owned" else env
+                  entries.append({
+                      "client_slug":        slug,
+                      "subscription_id":    subscription_id,
+                      "tenant_id":          tenant_id,
+                      "model":              model,
+                      "operations":         operations,
+                      "deploy_environment": deploy_environment,
+                      "environment":        env,
+                      "environment_class":  env_class,
+                      "region":             region,
+                      "tier":               tier,
+                      "persist_documents":  persist_documents,
+                      "zero_retention":     zero_retention,
+                      "sharepoint_site_id": sharepoint_site_id,
+                      "llm_provider":       llm_provider,
+                      "llm_model_sonnet":   llm_model_sonnet,
+                      "llm_model_haiku":    llm_model_haiku,
+                      "llm_model_opus":     llm_model_opus,
+                      "azure_openai_api_version": azure_openai_api_version,
+                      "azure_foundry_endpoint": azure_foundry_endpoint,
+                      "foundry_account_id": foundry_account_id,
+                      "provision_foundry":  provision_foundry,
+                      "candidate_summary_style_blob":  candidate_summary_style_blob,
+                      "client_logo_blob":              client_logo_blob,
+                      "reference_check_template_blob": reference_check_template_blob,
+                      "client_theme_blob":             client_theme_blob,
+                  })
+
+          if not entries:
+              print(f"No clients found with solution '{solution_name}' enabled for '{target_environment}'.")
+          else:
+              print(f"Deploying to {len(entries)} {target_environment} target(s): {[e['client_slug'] for e in entries]}")
+
+          matrix = json.dumps({"include": entries})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"matrix={matrix}\n")
+          EOF
+
