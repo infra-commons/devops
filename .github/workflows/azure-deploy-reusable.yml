@@ -6,23 +6,50 @@ name: Deploy — Azure Container Apps (reusable)
 # each carried independently — the single largest fork between those two repos,
 # every improvement made twice and in practice made once.
 #
-# LANDING IN LAYERS, not as one PR: 2,400+ differing lines between the two source
-# files does not fit any single reviewable diff. This file currently carries the
-# `build` and `load-matrix` jobs (layers 1-2 of the sequence below); `deploy`
-# follows in its own PR, then the caller-specific hardening rrc has and the
-# template does not lands as opt-in `input:` feature flags, one per PR. A
-# reusable workflow with no `deploy` job is valid YAML but not yet a usable
-# deploy path — do not treat this file's mere existence as evidence the
-# extraction is done; the definition of done is a green rolliq-test staging AND
-# promote on the fully-landed file, driven by the calling org.
+# LANDING IN LAYERS, in ONE PR rather than a stacked-PR-per-layer split: this
+# repo runs with delete_branch_on_merge, and a PR based on another PR's branch
+# self-closes (base_ref_deleted) the instant the base merges — a recorded
+# failure mode here, so a genuinely stacked change (each layer needs the one
+# before it) has no clean parallel-PR split until the base lands. Instead: one
+# commit per layer in this PR, so review can proceed commit-by-commit.
+#
+# That's a deliberate exception to the usual small-PR discipline, bounded by
+# blast radius rather than waived outright: nothing calls this file yet, so
+# nothing executes any of it — adoption is a separate, deliberate act in a
+# different org, unlike a same-size change to a workflow already being called.
+# Keeping that premise true is a condition of the exception: if a later commit
+# here starts modifying an existing CALLED workflow, the exception no longer
+# holds and the split comes back.
+#
+# This PR's bound: the workflow_call contract, `build`, `load-matrix`,
+# `deploy`, and (once the core is stable enough to test against) docs + the
+# self-test layers — the point at which the file is coherent and testable, not
+# the whole extraction. The caller-specific hardening one source repo has and
+# the other doesn't (pin-crash pre-flight, alert-rule-survived check, release
+# changelog, branding restart+verify, Easy Auth check, template-drift verify,
+# `mode: onboard-identities`) is deliberately NOT here — each becomes its own
+# PR off merged main, genuinely independent, each a near-pure lift with an
+# `if: inputs.enable_x` guard, openable in parallel. That's the split the
+# small-PR guideline actually wanted, and it becomes available for free once
+# this core merges.
+#
+# All three jobs now present (layers 1-3) is still not a usable deploy path on
+# its own — do not treat this file's existence as evidence the extraction is
+# done; the definition of done is a green rolliq-test staging AND promote on
+# the fully-landed file (core + every hardening layer), driven by the calling
+# org.
 #
 # CONTRACT GROWTH, layer by layer, stated explicitly rather than left implicit:
 # layer 1 (build) declared client_slug, allowed_class, target_environment,
-# image_ref, mode, image_digest, and 5 secrets. Layer 2 (load-matrix) needed
-# exactly one addition: secrets.CLIENTS_CONFIG_TOKEN (cross-repo checkout of
-# rolliq-com/clients-config). No new `inputs:`/`outputs:` — load-matrix consumes
-# inputs layer 1 already declared and exposes its `matrix` output only to the
-# `deploy` job internally via `needs:`, not through `workflow_call.outputs`.
+# image_ref, mode, image_digest, and 5 secrets. Layer 2 (load-matrix) added
+# exactly one: secrets.CLIENTS_CONFIG_TOKEN (cross-repo checkout of
+# rolliq-com/clients-config). Layer 3 (deploy) added six more —
+# ACR_IMPORT_PASSWORD, ACR_IMPORT_USERNAME, ANTHROPIC_API_KEY,
+# PLATFORM_IAC_TOKEN, TF_STATE_RESOURCE_GROUP, TF_STATE_STORAGE_ACCOUNT — and
+# no new `inputs:`/`outputs:`: every `inputs.*` the deploy job reads
+# (image_ref, mode) was already declared in layer 1, and its own per-client
+# outcome stays internal (job `strategy: matrix`), not exposed through
+# `workflow_call.outputs`.
 #
 # One thing that will NOT move here: rrc's Layer-2 staging E2E gate
 # (Zoom -> LLM -> SharePoint delivery) is product integration testing, not a
@@ -55,17 +82,24 @@ name: Deploy — Azure Container Apps (reusable)
 #         AZURE_MANAGEMENT_SUBSCRIPTION_ID: ${{ secrets.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}
 #         ACR_NAME: ${{ secrets.ACR_NAME }}
 #         ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+#         CLIENTS_CONFIG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+#         ACR_IMPORT_PASSWORD: ${{ secrets.ACR_IMPORT_PASSWORD }}
+#         ACR_IMPORT_USERNAME: ${{ secrets.ACR_IMPORT_USERNAME }}
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         PLATFORM_IAC_TOKEN: ${{ secrets.PLATFORM_IAC_TOKEN }}
+#         TF_STATE_RESOURCE_GROUP: ${{ secrets.TF_STATE_RESOURCE_GROUP }}
+#         TF_STATE_STORAGE_ACCOUNT: ${{ secrets.TF_STATE_STORAGE_ACCOUNT }}
 #
-# Resulting check name: "<caller_job_id> / build" until `deploy` lands, then
-# "<caller_job_id> / deploy" is the one to add to required_status_checks.
+# Resulting check name: "<caller_job_id> / deploy" — that's the one to add to
+# required_status_checks once an org adopts this reusable.
 #
 # Self-test scope, stated up front so a green self-test is never mistaken for a
 # green rolliq-test promote: this repo holds no Azure credentials, so nothing
 # here can prove a real bicep apply. What a self-test in this repo CAN prove —
 # embedded-script correctness, the expression-length guard, the permissions/
-# caller-doc contract above — lands alongside the `deploy` job (layer 3), once
-# there is a stable target to test against. The live end-to-end proof is DoD
-# item 2 of the extraction issue and is the calling org's to run.
+# caller-doc contract above — lands in its own commit in this PR, once the
+# three jobs above are stable enough to test against. The live end-to-end
+# proof is DoD item 2 of the extraction issue and is the calling org's to run.
 
 on:
   workflow_call:
@@ -110,6 +144,18 @@ on:
       ACR_LOGIN_SERVER:
         required: true
       CLIENTS_CONFIG_TOKEN:
+        required: true
+      ACR_IMPORT_PASSWORD:
+        required: true
+      ACR_IMPORT_USERNAME:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: true
+      PLATFORM_IAC_TOKEN:
+        required: true
+      TF_STATE_RESOURCE_GROUP:
+        required: true
+      TF_STATE_STORAGE_ACCOUNT:
         required: true
 
 permissions: {}
@@ -552,3 +598,1413 @@ jobs:
               fh.write(f"matrix={matrix}\n")
           EOF
 
+
+  # ── 3. Deploy to each client (fail-isolated) ────────────────────────────────
+  deploy:
+    name: Deploy → ${{ matrix.client_slug }} (${{ matrix.environment }})
+    needs: [build, load-matrix]
+    if: ${{ fromJson(needs.load-matrix.outputs.matrix).include[0] != null }}
+    strategy:
+      matrix: ${{ fromJson(needs.load-matrix.outputs.matrix) }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+
+    # rolliq_managed → shared tier environment (`staging`/`prod`). client_owned
+    # (Phase 1b) → per-client `<slug>-<env>`, whose required reviewer gates prod.
+    environment: ${{ matrix.deploy_environment }}
+
+    permissions:
+      id-token: write   # required for OIDC — do not remove
+      contents: read
+
+    env:
+      SOLUTION_NAME: ${{ needs.build.outputs.solution_name }}
+      # Promotion: when image_ref is set, deploy that exact (already-built, signed)
+      # artifact; otherwise deploy the DIGEST this run's build job produced. A prod
+      # deploy always sets image_ref (see the prod-gate below).
+      #
+      # Both arms are digest-pinned (#530). The build arm used to be
+      # `:sha-<commit>`, which has no client component while a fresh image is
+      # built per client per run — so the last build of a commit took the tag from
+      # every earlier one, and a concurrent client's run could put ITS image
+      # behind this client's reference. Nothing keyed on the commit could see it:
+      # /version reports the same SHA either way.
+      #
+      # Both arrive registry-RELATIVE (name@digest) because the ACR login server
+      # is a secret and can't cross a job-output boundary — so prefix it here.
+      IMAGE_TAG: ${{ inputs.image_ref != '' && format('{0}/{1}', secrets.ACR_LOGIN_SERVER, inputs.image_ref) || format('{0}/{1}@{2}', secrets.ACR_LOGIN_SERVER, needs.build.outputs.solution_name, needs.build.outputs.image_digest) }}
+      TF_IN_AUTOMATION: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ matrix.subscription_id }}
+      ARM_USE_OIDC: "true"
+
+    steps:
+      # ── INPUT VALIDATION (runs before image_ref can reach cosign/Terraform) ───
+      # image_ref is caller-supplied and gets the ACR login server prefixed onto it
+      # to build IMAGE_TAG. Pin it to the exact shape promote-to-production.yml
+      # emits: a bare solution name plus an immutable digest (name@sha256:<64 hex>,
+      # see resolve-staging-image). Anchoring to that shape rejects path-traversal
+      # ("../"), an injected registry host, or a mutable tag before the value can
+      # steer cosign or Terraform at an attacker-chosen image. (An empty image_ref
+      # is the build-from-SHA path; the prod rail below requires it be set for prod.)
+      - name: Validate image_ref format
+        if: ${{ inputs.image_ref != '' }}
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+        run: |
+          if ! printf '%s' "$IMAGE_REF" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}@sha256:[0-9a-f]{64}$'; then
+            echo "::error::Refusing deploy: image_ref '${IMAGE_REF}' is not a registry-relative digest (expected 'name@sha256:<64 hex>'). A registry host, path-traversal, or a mutable tag is not permitted." >&2
+            exit 1
+          fi
+          echo "image_ref format OK: ${IMAGE_REF}"
+
+      # The promote path validates its ref above; this is the BUILD path's
+      # equivalent, and it covers the arm nothing else guards (#530). The prod
+      # rails below assert image_ref's shape and that IMAGE_TAG traces back to
+      # it — but on a staging build image_ref is empty, so before this step the
+      # build arm of the IMAGE_TAG ternary was asserted by nothing at all.
+      #
+      # It also fails closed on an EMPTY digest: `needs.build.outputs.image_digest`
+      # is empty if the build job did not run or docker/build-push-action's `id`
+      # is dropped, and without this the deploy would carry `<server>/<name>@` to
+      # a confusing Terraform error much further downstream.
+      #
+      # If this refuses a change you believe is correct, read
+      # tests/unit/test_deploy_image_is_digest_pinned.py — it states the rule
+      # (`sha-<commit>` may be WRITTEN as a label, never referenced) and why it
+      # is deny-by-default.
+      - name: Deployed identity is the digest (no mutable tag)
+        if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
+        env:
+          RESOLVED_IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: |
+          if ! printf '%s' "$RESOLVED_IMAGE_TAG" | grep -Eq '@sha256:[0-9a-f]{64}$'; then
+            echo "::error::Refusing deploy: the image is not pinned by digest. A per-commit tag has no client component and is overwritten by the last build of that commit, so it can resolve to another client's image (#530). Resolved ref ends: '$(printf '%s' "$RESOLVED_IMAGE_TAG" | tail -c 24)'." >&2
+            exit 1
+          fi
+          echo "Image is digest-pinned (ends ...$(printf '%s' "$RESOLVED_IMAGE_TAG" | tail -c 20))."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ── THE PROD RAIL ────────────────────────────────────────────────────────
+      # A prod deploy is only ever reached with a staging-validated, signed image.
+      # This gate lives in the reusable (the layer that touches prod), so it holds
+      # regardless of which caller invoked it — there is no bypass.
+      #   (a) image_ref MUST be set — a rebuild-from-source cannot reach prod.
+      #   (b) that image MUST carry a cosign keyless signature minted by THIS
+      #       repo's release-staging.yml (only that workflow's OIDC identity can
+      #       produce it — a forged ACR tag is not sufficient).
+      - name: Production rail — require an image_ref (no rebuild-to-prod)
+        if: ${{ matrix.environment == 'prod' && inputs.mode != 'onboard-identities' }}
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+        run: |
+          if [ -z "$IMAGE_REF" ]; then
+            echo "::error::Refusing prod deploy: no image_ref. Prod ships only a staging-validated digest — dispatch promote-to-production.yml, which builds+tests on staging first. There is no rebuild-to-prod path." >&2
+            exit 1
+          fi
+          echo "image_ref present ($IMAGE_REF) — verifying its staging signature next."
+
+      # Cosign (below) and the deploy step (further down) both key off env.IMAGE_TAG
+      # rather than inputs.image_ref directly, so they are guaranteed to act on the
+      # identical ref BY CONSTRUCTION — but that guarantee depends on the ternary in
+      # IMAGE_TAG's definition evaluating correctly. Assert it explicitly here so a
+      # future refactor that breaks that ternary fails closed instead of letting
+      # cosign silently verify a different image than what gets deployed.
+      - name: Production rail — IMAGE_TAG must trace back to image_ref
+        if: ${{ matrix.environment == 'prod' && inputs.mode != 'onboard-identities' }}
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+          RESOLVED_IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          EXPECTED="${ACR_LOGIN_SERVER}/${IMAGE_REF}"
+          if [ "$RESOLVED_IMAGE_TAG" != "$EXPECTED" ]; then
+            echo "::error::IMAGE_TAG ('${RESOLVED_IMAGE_TAG}') does not match the ref expected from image_ref ('${EXPECTED}'). Refusing to deploy — cosign verification and the deploy step must operate on the identical, input-derived image." >&2
+            exit 1
+          fi
+          echo "IMAGE_TAG confirmed to trace back to image_ref: ${RESOLVED_IMAGE_TAG}"
+
+      # Log in to Rolliq's management subscription (hosts the central ACR) so cosign
+      # can resolve the OCI image for verification. rolliq_managed ONLY: for
+      # client_owned the job runs in the <slug>-prod environment whose scoped
+      # AZURE_CLIENT_ID/AZURE_TENANT_ID are the CUSTOMER's, which cannot authenticate
+      # into Rolliq's tenant/subscription — that path reaches the central ACR with
+      # the repo-level ACR_IMPORT credentials (never env-shadowed) in the next step.
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3
+        if: ${{ matrix.environment == 'prod' && matrix.model == 'rolliq_managed' }}
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}
+
+      - name: Install cosign
+        if: ${{ matrix.environment == 'prod' && inputs.mode != 'onboard-identities' }}
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Production rail — verify the staging cosign signature
+        if: ${{ matrix.environment == 'prod' && inputs.mode != 'onboard-identities' }}
+        env:
+          # Full registry-qualified ref (IMAGE_TAG re-prefixes the secret ACR server
+          # onto the registry-relative image_ref) — cosign needs it to pull the
+          # image + its signature. This is the exact ref that gets deployed below
+          # (rolliq_managed) or imported into the customer ACR (client_owned).
+          IMAGE_REF: ${{ env.IMAGE_TAG }}
+          CLIENT_SLUG: ${{ matrix.client_slug }}
+          ACR_IMPORT_USERNAME: ${{ secrets.ACR_IMPORT_USERNAME }}
+          ACR_IMPORT_PASSWORD: ${{ secrets.ACR_IMPORT_PASSWORD }}
+        run: |
+          # Authenticate to Rolliq's central ACR so cosign can pull the image + its
+          # signature. rolliq_managed uses the management az context logged in above;
+          # client_owned's az context is the customer tenant (no access to the
+          # central ACR), so log cosign in directly with the repo-level ACR import
+          # credentials — Rolliq's, and never shadowed by the customer environment.
+          if [ "${{ matrix.model }}" = "client_owned" ]; then
+            # Feed the password via stdin, not -p: a CLI-flag password is visible in
+            # the runner process table (ps aux) to co-tenant processes and can leak
+            # into ACTIONS_STEP_DEBUG logs. printf (no trailing newline) keeps the
+            # token exact for --password-stdin.
+            printf '%s' "$ACR_IMPORT_PASSWORD" | cosign login "${{ secrets.ACR_LOGIN_SERVER }}" \
+              -u "$ACR_IMPORT_USERNAME" --password-stdin
+          else
+            az acr login --name "${{ secrets.ACR_NAME }}" >/dev/null
+          fi
+          # -a client_slug binds the promotion to THIS client's staging run (#475).
+          # Identity alone proves only that SOME client's release-staging validated
+          # the digest; the client binding was otherwise carried entirely by the
+          # mutable staging-ok-<slug> tag, which only SELECTS the candidate and is
+          # explicitly not trusted. Anything with ACR write access could move that
+          # pointer onto a digest validated for a different client — different
+          # config, different SharePoint site, possibly a different LLM provider —
+          # and this gate would have passed it. cosign accepts the signature only
+          # if a signature over this digest carries the matching annotation.
+          echo "Verifying staging signature for ${IMAGE_REF} (must be signed by this repo's release-staging.yml for client ${CLIENT_SLUG})"
+          cosign verify "${IMAGE_REF}" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-staging.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            -a "client_slug=${CLIENT_SLUG}" \
+            >/dev/null \
+            || { echo "::error::No valid staging signature for ${IMAGE_REF} bound to client_slug=${CLIENT_SLUG}. Either this image was not built + validated by release-staging.yml for THIS client, or it was signed before the client_slug binding was introduced (#475) — in that case re-run release-staging for ${CLIENT_SLUG} to re-sign the current image. Refusing to promote." >&2; exit 1; }
+          echo "✅ Signature verified — image was staging-validated by release-staging.yml for ${CLIENT_SLUG}."
+
+      # Block ALL deployments (test/staging/prod) until a passing security review
+      # exists — the review must precede any real config or integrations running,
+      # and test/staging deliberately run the exact same path as prod.
+      # Both facts this gate needs — a passing verdict, and that the review is
+      # about THIS solution — must come from the SAME review (#472). Checked
+      # separately against the whole document (as they were until #472), the
+      # shipped template example's PASS row satisfied the first for a solution
+      # that had only satisfied the second, which is precisely the state a
+      # partially-edited document is in.
+      #
+      # A review block is one contiguous two-column table, not a heading section:
+      # every real review here and in the solutions puts Solution and Result in a
+      # single `| Field | Value |` table, and a table cannot straddle a heading.
+      #
+      # Deliberately carries no ${{ }} — that is what lets
+      # tests/unit/test_security_review_gate.py execute this body verbatim. A gate
+      # that passes for the wrong reason is indistinguishable from one that
+      # passed, so it is tested by running it, not by reading it.
+      - name: Security review gate
+        run: |
+          python3 << 'EOF'
+          import re, sys
+          from pathlib import Path
+
+          CHECKLIST = "See docs/REVIEW-CHECKLIST.md for the review process."
+
+
+          def fail(*lines):
+              for line in lines:
+                  print(line)
+              sys.exit(1)
+
+
+          p = Path("docs/SECURITY-REVIEW.md")
+          if not p.exists():
+              fail("ERROR: docs/SECURITY-REVIEW.md not found.",
+                   "A pre-production security review is required before deploying.",
+                   CHECKLIST)
+
+          # No name, no gate. The name is what scopes a verdict to this solution;
+          # without it the gate degrades to "any PASS row anywhere", which is the
+          # defect. This fails closed where it used to skip the check silently —
+          # a deploy cannot get this far without a name anyway (deploy.yml reads
+          # the same field to build the image ref).
+          sol = Path("SOLUTION.yaml")
+          m = re.search(r'(?m)^name:\s*"?([a-z0-9][a-z0-9-]*[a-z0-9])"?',
+                        sol.read_text()) if sol.exists() else None
+          name = m.group(1) if m else None
+          if not name:
+              fail("ERROR: no solution name could be read from SOLUTION.yaml.",
+                   "The security-review gate identifies the review by that name, so it",
+                   "cannot decide anything without one. Refusing to deploy.")
+
+          text = p.read_text()
+          # An example table in a comment or a fenced block documents the format;
+          # it is not a review, and must not be able to satisfy the gate.
+          text = re.sub(r'<!--.*?-->', '', text, flags=re.S)
+          text = re.sub(r'(?ms)^```.*?^```[ \t]*$', '', text)
+
+          PASSING = re.compile(r'^\*\*PASS(?:-[A-Z]+)*\*\*$')
+          NAMED = re.compile(r'(?<![0-9a-z-])' + re.escape(name) + r'(?![0-9a-z-])')
+
+          def cells_of(line):
+              return [c.strip() for c in line.strip("|").split("|")]
+
+
+          def is_rule(cells):
+              """The `|---|---|` line that sits under a table's header row."""
+              return all(re.fullmatch(r'[:\- ]*', c) for c in cells)
+
+
+          # A blank line is not the only thing that ends a table. Two tables that
+          # touch — no blank line, no heading between them — are one run of `|…|`
+          # lines, and splitting only on non-table lines would put a Solution row
+          # from the first and a Result row from the second in the SAME block.
+          # That is the #472 defect surviving its own fix, so a rule line also
+          # starts a new table: the row directly above it is that table's header,
+          # not the last row of the one before. Every table this produces is a
+          # subset of the run it came from, so the split can only ever withhold a
+          # pass, never manufacture one.
+          blocks, current = [], []
+          for line in text.splitlines():
+              s = line.strip()
+              if len(s) > 1 and s.startswith("|") and s.endswith("|"):
+                  if current and is_rule(cells_of(s)):
+                      header = current.pop()
+                      if current:
+                          blocks.append(current)
+                      current = [header]
+                  current.append(s)
+              elif current:
+                  blocks.append(current)
+                  current = []
+          if current:
+              blocks.append(current)
+
+
+          def fields(block):
+              """The `| Field | Value |` rows of one table. Rows with any other
+              width are something else — the scan-result and conditions tables are
+              3- and 5-column and carry unbolded PASS values."""
+              rows = []
+              for line in block:
+                  cells = cells_of(line)
+                  if len(cells) != 2 or is_rule(cells):
+                      continue
+                  rows.append((cells[0].strip("* `").strip().lower(), cells[1]))
+              return rows
+
+
+          winner = None
+          mine_unpassed = []   # names this solution, verdict is not a pass
+          passed_others = []   # a passing verdict, but for another solution
+
+          for block in blocks:
+              rows = fields(block)
+              results = [v for k, v in rows if k == "result"]
+              solutions = [v for k, v in rows if k == "solution"]
+              if not results or not solutions:
+                  continue
+              # Two verdicts in one table is ambiguous; require every one of them
+              # to pass rather than picking the friendliest.
+              passing = all(PASSING.match(v) for v in results)
+              mine = any(NAMED.search(v.lower()) for v in solutions)
+              if passing and mine:
+                  winner = (rows, solutions[0], results[0])
+                  break
+              if mine:
+                  mine_unpassed.append((solutions[0], results[0]))
+              elif passing:
+                  passed_others.append((solutions[0], results[0]))
+
+          if winner:
+              rows, solution, result = winner
+              date = next((v for k, v in rows if k in ("review date", "date")), "unspecified")
+              print("Security review gate: passing review found — proceeding.")
+              print(f"  Solution: {solution}")
+              print(f"  Result:   {result}")
+              print(f"  Reviewed: {date}")
+              sys.exit(0)
+
+          lines = [f"ERROR: docs/SECURITY-REVIEW.md has no passing review for '{name}'."]
+          if mine_unpassed:
+              solution, result = mine_unpassed[0]
+              lines += [
+                  f"A review naming this solution exists, but its verdict is: {result}",
+                  "Required is **PASS** or **PASS-WITH-CONDITIONS** in the SAME review",
+                  "table as the Solution row. (The shipped template example verdict is",
+                  "TEMPLATE-EXAMPLE, which is rejected by design.)",
+              ]
+          if passed_others:
+              solution, result = passed_others[0]
+              lines += [
+                  f"A passing review exists, but it is for {solution} — not '{name}'.",
+                  "A verdict belonging to another review (for example the platform-level",
+                  "example this template ships) does not authorise deploying this",
+                  "solution. Write your own review.",
+              ]
+          if not mine_unpassed and not passed_others:
+              lines += [
+                  "Add a review whose table carries BOTH a | Solution | row naming",
+                  f"'{name}' and a | Result | **PASS** | row.",
+              ]
+          fail(*lines, CHECKLIST)
+          EOF
+
+      # Authenticate using OIDC — no long-lived credentials stored anywhere.
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ matrix.subscription_id }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: "1.9.x"
+
+      # Terraform downloads platform-iac modules from a private GitHub repo.
+      # Terraform fetches the platform-iac modules over HTTPS, so the fetch needs a
+      # credential. Scope it to a file under $RUNNER_TEMP rather than writing an org
+      # PAT into ~/.gitconfig, where nothing removes it and every later step in the
+      # job inherits it (rrc#939, back-ported here under #468). include.path keeps
+      # whatever the runner already had in ~/.gitconfig in effect.
+      - name: Configure git for private Terraform modules
+        env:
+          PLATFORM_IAC_TOKEN: ${{ secrets.PLATFORM_IAC_TOKEN }}
+        run: |
+          set -euo pipefail
+          gitconfig="$RUNNER_TEMP/tf-gitconfig"
+          git config --file "$gitconfig" include.path "$HOME/.gitconfig"
+          git config --file "$gitconfig" \
+            url."https://x-access-token:${PLATFORM_IAC_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$gitconfig" >> "$GITHUB_ENV"
+
+      # ── client_owned: prepare the customer tenant ────────────────────────────
+      # Bootstrap the Terraform remote-state backend (RG + storage account +
+      # container) in the CUSTOMER's own tenant before init, and register the
+      # resource-provider namespaces a brand-new customer subscription needs before
+      # apply. Both are idempotent no-ops on later deploys and are resilient to
+      # first-deploy cross-tenant OIDC propagation lag. rolliq_managed uses Rolliq's
+      # central state backend + an already-registered subscription, so it skips both.
+      - name: Bootstrap Terraform state backend (client_owned)
+        id: state-backend
+        if: ${{ matrix.model == 'client_owned' }}
+        uses: rolliq-com/platform-iac/.github/actions/bootstrap-tfstate-backend@c5105fb85bb78caf1bb3e99bf5feee2fb2109fa2 # v0.4.16
+        with:
+          client-slug:     ${{ matrix.client_slug }}
+          subscription-id: ${{ matrix.subscription_id }}
+          region:          ${{ matrix.region }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+
+      # Runs for BOTH deployment models: either can target a brand-new subscription
+      # with nothing registered — client_owned onto the customer's tenant, and
+      # rolliq_managed onto a freshly-provisioned dedicated Mid subscription
+      # (platform-iac/scripts/provision-subscription.sh). Idempotent no-op on the
+      # worn rolliq_managed path (a shared, already-registered subscription). Only
+      # these two models exist; the explicit gate documents intent.
+      - name: Register required resource providers (fresh subscription)
+        if: ${{ matrix.model == 'client_owned' || matrix.model == 'rolliq_managed' }}
+        uses: rolliq-com/platform-iac/.github/actions/register-resource-providers@1a3225425cd1ebc636c7d952ecfb8251b96842a2 # v0.4.17
+        with:
+          subscription-id: ${{ matrix.subscription_id }}
+
+      - name: Terraform init (rolliq_managed — central backend)
+        if: ${{ matrix.model == 'rolliq_managed' }}
+        working-directory: infra
+        run: |
+          terraform init \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="resource_group_name=${{ secrets.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="subscription_id=${{ secrets.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=${{ matrix.client_slug }}/${{ env.SOLUTION_NAME }}/${{ matrix.environment }}.tfstate" \
+            -backend-config="use_azuread_auth=true"
+
+      # client_owned: Terraform state lives in the CUSTOMER's tenant (the backend
+      # bootstrapped above), not Rolliq's central backend.
+      - name: Terraform init (client_owned — customer-tenant backend)
+        if: ${{ matrix.model == 'client_owned' }}
+        working-directory: infra
+        run: |
+          terraform init \
+            -backend-config="storage_account_name=${{ steps.state-backend.outputs.state-storage-account }}" \
+            -backend-config="resource_group_name=${{ steps.state-backend.outputs.state-resource-group }}" \
+            -backend-config="subscription_id=${{ matrix.subscription_id }}" \
+            -backend-config="container_name=${{ steps.state-backend.outputs.container-name }}" \
+            -backend-config="key=${{ matrix.client_slug }}/${{ env.SOLUTION_NAME }}/${{ matrix.environment }}.tfstate" \
+            -backend-config="use_azuread_auth=true"
+
+      - name: Select or create workspace
+        working-directory: infra
+        run: |
+          terraform workspace select "${{ matrix.client_slug }}-${{ matrix.environment }}" \
+            || terraform workspace new "${{ matrix.client_slug }}-${{ matrix.environment }}"
+
+      # ── mode: onboard-identities (operations#132) ───────────────────────────
+      # Early identity-provisioning: create ONLY the resource group + runtime
+      # managed identity in the SAME central state the later full deploy reads,
+      # emit the MI's IDs, then let the job end (every later step is gated off for
+      # this mode). Lets the runtime MI exist BEFORE the customer's tenant admin is
+      # asked for the SharePoint grant, so it lands on the right principal and is
+      # collected in one early request off the go-live critical path. The MI lands
+      # in shared state, so the later full deploy consumes it as a no-op (no
+      # `terraform import`). A narrowed RG+MI target set is safe: this runs before
+      # the first full deploy, so there are no pending `moved` blocks to exclude.
+      - name: Provision runtime identities (onboard-identities)
+        if: ${{ inputs.mode == 'onboard-identities' }}
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve -input=false \
+            -target=azurerm_resource_group.main \
+            -target=azurerm_user_assigned_identity.acr_pull \
+            -var="client_slug=${{ matrix.client_slug }}" \
+            -var="solution_name=${{ env.SOLUTION_NAME }}" \
+            -var="environment=${{ matrix.environment }}" \
+            -var="region=${{ matrix.region }}" \
+            -var="tier=${{ matrix.tier }}" \
+            -var="image_tag=${IMAGE_TAG}" \
+            -var="deployment_model=${{ matrix.model }}" \
+            -var="operations=${{ matrix.operations }}" \
+            -var="persist_documents=${{ matrix.persist_documents }}" \
+            -var="zero_retention=${{ matrix.zero_retention }}" \
+            -var="rolliq_management_subscription_id=${{ vars.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}" \
+            -var-file="tiers/${{ matrix.tier }}.tfvars"
+
+          MI_CLIENT_ID=$(terraform output -raw mi_client_id)
+          MI_PRINCIPAL_ID=$(terraform output -raw mi_principal_id)
+          MI_NAME=$(terraform output -raw mi_name)
+
+          echo "Runtime managed identity provisioned: name=$MI_NAME client_id=$MI_CLIENT_ID principal_id=$MI_PRINCIPAL_ID"
+
+          {
+            echo "## Runtime managed identity provisioned (mode: onboard-identities)"
+            echo ""
+            echo "Client \`${{ matrix.client_slug }}\` (${{ matrix.environment }}) — grant the customer tenant access request against **this principal** (not the deploy SP):"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| MI name | \`$MI_NAME\` |"
+            echo "| Application (client) ID | \`$MI_CLIENT_ID\` |"
+            echo "| Object (principal) ID | \`$MI_PRINCIPAL_ID\` |"
+            echo ""
+            echo "Use these to fill in the SharePoint \`Sites.Selected\` + per-site write grant in the customer tenant access request. The later full deploy consumes this same MI as a state no-op."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Resolve the image the Container App will pull.
+      #   rolliq_managed → pull straight from Rolliq's central ACR (IMAGE_TAG).
+      #   client_owned   → the customer-tenant ACR must exist before the import, so
+      #                    create it (+ its RG and pull identity) with a TARGETED
+      #                    apply, then `az acr import` the exact IMAGE_TAG into it
+      #                    (source read with the repo-level ACR pull creds; dest
+      #                    written via the customer SP's Contributor) and pull from
+      #                    there — no Rolliq runtime dependency in the customer tenant.
+      - name: Resolve deploy image
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        id: image
+        working-directory: infra
+        env:
+          ACR_IMPORT_USERNAME: ${{ secrets.ACR_IMPORT_USERNAME }}
+          ACR_IMPORT_PASSWORD: ${{ secrets.ACR_IMPORT_PASSWORD }}
+        run: |
+          if [ "${{ matrix.model }}" != "client_owned" ]; then
+            echo "tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Monitor-alerts move coverage, ported from rrc PR #593: a TARGETED
+          # apply refuses to proceed unless every pending `moved` block's source
+          # AND destination address is in the target set ("Moved resource
+          # instances excluded by targeting"). infra/alerts.tf relocates the
+          # previously-inline action group + scheduled-query rules into
+          # module.monitor_alerts, so target BOTH the old top-level addresses
+          # (the move sources) and module.monitor_alerts (the move destinations).
+          # On a solution cloned from this template the moves never pend (fresh
+          # state) and these targets are no-ops; on state predating the module
+          # refactor they let this step reconcile the move instead of failing
+          # hard. enable_alerts is unset here (defaults false -> count 0), so no
+          # query rule is created before ContainerAppConsoleLogs_CL exists.
+          terraform apply -auto-approve -input=false \
+            -target=azurerm_resource_group.main \
+            -target=azurerm_user_assigned_identity.acr_pull \
+            -target=azurerm_container_registry.client \
+            -target=azurerm_role_assignment.client_acr_pull \
+            -target=azurerm_monitor_action_group.ops \
+            -target=azurerm_monitor_scheduled_query_rules_alert_v2.auth_failures \
+            -target=azurerm_monitor_scheduled_query_rules_alert_v2.error_rate \
+            -target=azurerm_monitor_scheduled_query_rules_alert_v2.token_usage \
+            -target=module.monitor_alerts \
+            -var="client_slug=${{ matrix.client_slug }}" \
+            -var="solution_name=${{ env.SOLUTION_NAME }}" \
+            -var="environment=${{ matrix.environment }}" \
+            -var="region=${{ matrix.region }}" \
+            -var="tier=${{ matrix.tier }}" \
+            -var="image_tag=${IMAGE_TAG}" \
+            -var="deployment_model=${{ matrix.model }}" \
+            -var="operations=${{ matrix.operations }}" \
+            -var="persist_documents=${{ matrix.persist_documents }}" \
+            -var="zero_retention=${{ matrix.zero_retention }}" \
+            -var="rolliq_management_subscription_id=${{ vars.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}" \
+            -var-file="tiers/${{ matrix.tier }}.tfvars"
+
+          DEST_ACR=$(terraform output -raw client_acr_name)
+          DEST_LOGIN=$(terraform output -raw client_acr_login_server)
+          # The destination keeps a friendly tag as a LABEL; the deployment
+          # references the digest (#530). The source is IMAGE_TAG — the exact
+          # central-ACR ref being deployed, always digest-pinned now (the
+          # promoted staging digest, or the digest this run built).
+          DEST_IMAGE="${SOLUTION_NAME}:sha-${{ github.sha }}"
+          SRC_REF="${IMAGE_TAG}"
+          echo "Importing ${SRC_REF} into ${DEST_LOGIN} as ${DEST_IMAGE}"
+          az acr import \
+            --name "$DEST_ACR" \
+            --source "$SRC_REF" \
+            --image "$DEST_IMAGE" \
+            --username "$ACR_IMPORT_USERNAME" \
+            --password "$ACR_IMPORT_PASSWORD" \
+            --force
+          # "az acr import preserves the digest" is the assumption the whole
+          # client_owned chain rests on: cosign verified the CENTRAL ACR digest,
+          # and this copy into the customer's registry is only trustworthy if it
+          # is the same manifest. Assert it rather than assume it.
+          #
+          # Refuse a source that is not digest-pinned rather than silently
+          # comparing the whole ref. `${SRC_REF##*@}` on a ref with no '@' yields
+          # the ref itself, so the equality check below would still fail — but
+          # with a message blaming the import for a mismatch it did not cause,
+          # which is the wrong place to send an incident responder.
+          if [[ "$SRC_REF" != *@sha256:* ]]; then
+            echo "::error::Refusing client_owned import: the source ref '${SRC_REF}' is not digest-pinned, so there is no digest to preserve (#530)." >&2
+            exit 1
+          fi
+          SRC_DIGEST="${SRC_REF##*@}"
+          # Resolve the DIGEST, not the tag just written. Asking the registry
+          # "what does this tag point at now?" has a real window: a concurrent
+          # `az acr import --force` between the import and this call moves the
+          # tag, and the answer would then describe an image nothing verified. A
+          # digest reference is immutable, so "this exact manifest is present in
+          # the destination" is a property no concurrent write can invalidate.
+          DEST_DIGEST=$(az acr repository show \
+            --name "$DEST_ACR" --image "${SOLUTION_NAME}@${SRC_DIGEST}" \
+            --query digest -o tsv 2>/dev/null || true)
+          if [ "$DEST_DIGEST" != "$SRC_DIGEST" ]; then
+            echo "::error::The verified manifest ${SRC_DIGEST} is not present in ${DEST_ACR} after import (resolved '${DEST_DIGEST:-nothing}'). The customer registry does not hold the artifact cosign verified, so build-once no longer holds. Refusing to deploy." >&2
+            exit 1
+          fi
+          # By digest, so what is deployed cannot be moved by anything that later
+          # rewrites the DEST_IMAGE label.
+          echo "tag=${DEST_LOGIN}/${SOLUTION_NAME}@${SRC_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      # The Azure Monitor alert rules query the ContainerAppConsoleLogs_CL table,
+      # which Log Analytics only materialises after the Container App has emitted
+      # logs. On the FIRST apply the app does not exist yet, so creating the rules
+      # would 400 ("Failed to resolve table"). Once the Container App is in
+      # Terraform state a prior apply succeeded and the app has been logging, so it
+      # is safe — and required for production alerting — to enable the rules on this
+      # and every subsequent apply. This auto-heals the second-deploy flip instead
+      # of relying on an operator to remember to set enable_alerts=true.
+      - name: Determine alerting state
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        id: alerts
+        working-directory: infra
+        run: |
+          if terraform state list 2>/dev/null | grep -q '^module\.container_app\.azurerm_container_app\.this$'; then
+            echo "enable_alerts=true" >> "$GITHUB_OUTPUT"
+            echo "Container App already in state -> enabling Azure Monitor alert rules"
+          else
+            echo "enable_alerts=false" >> "$GITHUB_OUTPUT"
+            echo "First apply (Container App not yet in state) -> alert rules deferred to the next deploy"
+          fi
+
+      # Adopt an orphaned Container Apps managed environment into state BEFORE the
+      # plan. On a brand-new ("cold") subscription the environment's async create
+      # can return 409 ("ManagedEnvironmentOperationInProgress") AFTER Azure has
+      # already created the environment but BEFORE Terraform records it in state —
+      # so the apply errors, the environment is left in Azure but NOT in state, and
+      # the NEXT apply fails closed with "a resource with the ID ... already exists
+      # - to be managed via Terraform this resource needs to be imported". Import it
+      # here so a re-run self-heals instead of needing a manual `az containerapp env
+      # delete`. Non-destructive and idempotent: skipped when the env is already in
+      # state (steady-state deploys), or absent (the genuine first apply, before the
+      # environment exists). Mirrors the openai_account / azure-foundry-endpoint
+      # adoption in the bootstrap step above. Observed live on a WS1 DoD#4
+      # fresh-subscription rehearsal in solution-recruitment-reference-check.
+      - name: Adopt orphaned Container Apps environment (fresh-subscription race)
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        working-directory: infra
+        run: |
+          CAE_ADDR='module.container_app.azurerm_container_app_environment.this'
+          if terraform state list 2>/dev/null | grep -qxF "$CAE_ADDR"; then
+            echo "Managed environment already tracked in Terraform state — nothing to adopt."
+            exit 0
+          fi
+          RG=$(terraform output -raw resource_group_name 2>/dev/null || true)
+          if [ -z "$RG" ]; then
+            echo "Resource group not in state yet (first apply has not run) — nothing to adopt."
+            exit 0
+          fi
+          # Exactly one managed environment exists per solution resource group.
+          CAE_ID=$(az containerapp env list -g "$RG" --query "[0].id" -o tsv 2>/dev/null || true)
+          if [ -n "$CAE_ID" ]; then
+            echo "Adopting orphaned Container Apps environment into state: $CAE_ID"
+            terraform import "$CAE_ADDR" "$CAE_ID" \
+              || echo "::warning::import of the managed environment failed — the plan/apply below will surface any real conflict"
+          else
+            echo "No existing managed environment in $RG — nothing to adopt (genuine first apply)."
+          fi
+
+      - name: Terraform plan
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        working-directory: infra
+        run: |
+          terraform plan -out=tfplan \
+            -var="enable_alerts=${{ steps.alerts.outputs.enable_alerts }}" \
+            -var="client_slug=${{ matrix.client_slug }}" \
+            -var="solution_name=${{ env.SOLUTION_NAME }}" \
+            -var="environment=${{ matrix.environment }}" \
+            -var="region=${{ matrix.region }}" \
+            -var="tier=${{ matrix.tier }}" \
+            -var="image_tag=${{ steps.image.outputs.tag }}" \
+            -var="deployment_model=${{ matrix.model }}" \
+            -var="operations=${{ matrix.operations }}" \
+            -var="persist_documents=${{ matrix.persist_documents }}" \
+            -var="zero_retention=${{ matrix.zero_retention }}" \
+            -var="rolliq_management_subscription_id=${{ vars.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}" \
+            -var="llm_provider=${{ matrix.llm_provider }}" \
+            -var="llm_model_sonnet=${{ matrix.llm_model_sonnet }}" \
+            -var="llm_model_haiku=${{ matrix.llm_model_haiku }}" \
+            -var="llm_model_opus=${{ matrix.llm_model_opus }}" \
+            -var="azure_openai_api_version=${{ matrix.azure_openai_api_version }}" \
+            -var="foundry_account_id=${{ matrix.foundry_account_id }}" \
+            -var="provision_foundry=${{ matrix.provision_foundry }}" \
+            -var="candidate_summary_style_blob=${{ matrix.candidate_summary_style_blob }}" \
+            -var="client_logo_blob=${{ matrix.client_logo_blob }}" \
+            -var="reference_check_template_blob=${{ matrix.reference_check_template_blob }}" \
+            -var="client_theme_blob=${{ matrix.client_theme_blob }}" \
+            -var-file="tiers/${{ matrix.tier }}.tfvars"
+
+      - name: Terraform apply
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        working-directory: infra
+        run: terraform apply -auto-approve tfplan
+
+      # Re-mint a fresh OIDC login before the Key Vault DATA-PLANE seeding below.
+      # The job-start azure/login stored the GitHub OIDC assertion, which the az CLI
+      # re-exchanges the FIRST time it needs a NEW-audience token — the first
+      # vault.azure.net token for the `az keyvault secret set/show` seed steps.
+      # Federated (WIF) logins get NO refresh token and a GitHub OIDC assertion is
+      # valid only a few minutes, so a slow first apply on a fresh subscription (the
+      # Container Apps managed-environment create + RBAC replication above can take
+      # 10+ min) pushes that first vault-token exchange past the assertion's expiry
+      # → AADSTS700024 "assertion not within its valid time range". The Terraform
+      # steps use ARM_USE_OIDC and mint their own fresh tokens, so only the az CLI
+      # seed path is exposed. Re-login here; az then caches the vault token for
+      # ~60 min, so this one re-login covers every seed step that follows.
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ matrix.subscription_id }}
+
+      # Grant the Container App Managed Identity read access to Key Vault.
+      - name: Grant Managed Identity Key Vault access
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        working-directory: infra
+        run: |
+          MI_PRINCIPAL_ID=$(terraform output -raw managed_identity_principal_id)
+          KV_RESOURCE_ID=$(terraform output -raw key_vault_resource_id)
+          az role assignment create \
+            --assignee-object-id "$MI_PRINCIPAL_ID" \
+            --assignee-principal-type ServicePrincipal \
+            --role "Key Vault Secrets User" \
+            --scope "$KV_RESOURCE_ID"
+
+      # ── Per-client branding assets ─────────────────────────────────────────────
+      # A client's branding assets (document logo, branded template, style guide,
+      # control-plane theme) are optional, non-PII brand artwork tracked in
+      # clients-config under assets/<blob-path-without-container>/. Uploaded here,
+      # after the storage account + client-branding container definitely exist,
+      # using the deploy identity's own Storage Blob Data Contributor grant
+      # (infra/main.tf) — a normal deploy step, not a one-off human RBAC grant +
+      # manual upload. Skipped entirely for onboard-identities (no storage account
+      # exists in that narrowed path).
+      #
+      # The step RECONCILES; it does not merely upload (#531, porting rrc#889 /
+      # rrc#898 / rrc#900 / rrc#906). A declared ref whose asset was never
+      # committed used to print a friendly line and return 0, so a finished
+      # migration and an unstarted one produced byte-identical output: a stale
+      # hand-uploaded blob stayed authoritative while every deploy reported
+      # success. Every declared ref is now classified against what is actually
+      # deployed, the containers touched are swept for blobs nothing declares, and
+      # the two steps after this one put the result into SERVICE and prove it.
+      # Converged from solution-recruitment-reference-check (rrc#754 / #468).
+      - name: Check out clients-config (branding assets)
+        if: ${{ (matrix.client_logo_blob != '' || matrix.reference_check_template_blob != '' || matrix.candidate_summary_style_blob != '' || matrix.client_theme_blob != '') && inputs.mode != 'onboard-identities' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rolliq-com/clients-config
+          token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+          path: clients-config-assets
+
+      - name: Upload client branding assets
+        if: ${{ (matrix.client_logo_blob != '' || matrix.reference_check_template_blob != '' || matrix.candidate_summary_style_blob != '' || matrix.client_theme_blob != '') && inputs.mode != 'onboard-identities' }}
+        id: branding
+        working-directory: infra
+        # Blob refs originate in clients-config. Pass them through the process
+        # ENVIRONMENT, never spliced into the script body with ${{ }} — a value
+        # containing backticks, $(), ; etc. would otherwise be interpreted as
+        # shell by the runner (which holds ARM creds + CLIENTS_CONFIG_TOKEN). With
+        # env vars the shell sees inert data, and upload_asset validates the shape
+        # before use (#491).
+        env:
+          CLIENT_LOGO_BLOB: ${{ matrix.client_logo_blob }}
+          REFERENCE_CHECK_TEMPLATE_BLOB: ${{ matrix.reference_check_template_blob }}
+          CANDIDATE_SUMMARY_STYLE_BLOB: ${{ matrix.candidate_summary_style_blob }}
+          CLIENT_THEME_BLOB: ${{ matrix.client_theme_blob }}
+        run: |
+          set -euo pipefail
+
+          # Liveness (#531). Installed FIRST, before any command that can fail.
+          # A report-only step that dies is otherwise indistinguishable from one
+          # that found nothing to report, and `terraform output` failing here
+          # would kill the step before it classified anything.
+          RECONCILE_STATUS="DID NOT COMPLETE"
+          trap 'if [ "$RECONCILE_STATUS" != "ok" ]; then
+                  echo "### Branding asset reconciliation: DID NOT COMPLETE" >> "$GITHUB_STEP_SUMMARY"
+                  echo "::warning::Branding asset reconciliation did not run to completion — treat its output as absent, not as a clean report (#531)."
+                fi' EXIT
+
+          STORAGE_ACCOUNT=$(terraform output -raw storage_account_name)
+
+          # Reconciliation (#531). A declared blob ref whose asset was not
+          # committed used to print a friendly line and return 0, so a finished
+          # migration and an unstarted one produced byte-identical output: a
+          # stale hand-uploaded blob stayed authoritative while every deploy
+          # reported success. Classify every declared ref against what is
+          # actually deployed instead of only acting when there is something to
+          # upload.
+          #
+          # REPORT-ONLY on purpose, matching rrc#898. The remediation for an
+          # UNMANAGED or UNDECLARED blob touches live customer artefacts in a
+          # client's own storage account, which wants its own rails; and this
+          # spine cannot know which of its derived solutions have migrated.
+          # Report first, flip to a gate on a recorded trigger.
+          ROWS=""
+          UNMANAGED_COUNT=0
+          UNREADABLE_COUNT=0
+          DECLARED_COUNT=0
+          UNDECLARED_COUNT=0
+          # Every asset whose BYTES this step changed. `terraform apply` (above)
+          # already created and STARTED the revision, and a solution that caches
+          # branding at startup therefore read the PREVIOUS bytes, so anything
+          # counted here was uploaded too late for the running revision. The
+          # steps below use this to restart the revision and then verify what is
+          # actually in service.
+          CHANGED_COUNT=0
+          # "<asset key>\t<sha256 of the committed asset>" for every ref this
+          # deploy can state an expected value for — i.e. one with a committed
+          # asset behind it. An UNMANAGED ref (declared, nothing committed) is
+          # deliberately absent: nothing in git says what it should be, so there
+          # is nothing to assert.
+          #
+          # A FIXED path, not `mktemp` (#536): a later step reads this file, and
+          # the only way to hand a `mktemp` name across a step boundary is to
+          # publish it, which put a generated path through GITHUB_OUTPUT and back
+          # onto a command line. A constant both steps derive independently means
+          # the boundary carries only a boolean. `: >` creates-or-truncates, so a
+          # re-run cannot inherit a previous attempt's rows.
+          EXPECTED_MANIFEST="${RUNNER_TEMP}/branding-expected-manifest.tsv"
+          : > "$EXPECTED_MANIFEST"
+          # Newline-delimited "<container>/<blob>" for every ref clients-config
+          # declares, and the set of containers worth sweeping afterwards. Both
+          # feed the undeclared sweep below. The leading newline is what lets
+          # that sweep's membership test anchor BOTH ends of a line: blob names
+          # are arbitrary paths, so an unanchored match would file a stray
+          # `acme/logo.png` as covered by a declared `acme/logo.png.bak` (end)
+          # or by a declared `mirror/client-branding/acme/logo.png` (start).
+          DECLARED_REFS=$'\n'
+          # An array, not a space-separated string. Every entry is safe today
+          # (each is either this literal or a container name from a ref that
+          # passed upload_asset's safe-path guard), but that is a non-local
+          # invariant nothing enforces, and word-splitting a string would also
+          # bring glob and tilde expansion along. An array removes the class.
+          SCAN_CONTAINERS=("client-branding")
+
+          blob_presence() {
+            # "yes" | "no" | "unknown". The three MUST stay distinct: the deploy
+            # identity holds Storage Blob Data Contributor, but if that grant is
+            # ever missing or the account is firewalled, collapsing "cannot read"
+            # into "not there" would report every unmanaged blob as benign — the
+            # reassuring answer, silently. That is the failure this whole step
+            # exists to stop, so it must not be reproduced inside it.
+            local container="$1" blob_name="$2" out
+            if out=$(az storage blob exists \
+                       --account-name "$STORAGE_ACCOUNT" --auth-mode login \
+                       --container-name "$container" --name "$blob_name" \
+                       --query exists -o tsv 2>/dev/null); then
+              case "$out" in
+                true)  echo "yes" ;;
+                false) echo "no" ;;
+                *)     echo "unknown" ;;
+              esac
+            else
+              echo "unknown"
+            fi
+          }
+
+          deployed_digest() {
+            # sha256 of the blob currently serving, or "" if it cannot be read.
+            # Reads the bytes rather than trusting properties.contentMd5, which
+            # Azure only populates when the uploader happened to set it. sha256
+            # (not md5) because the SAME digest is asserted against what the
+            # running app reports it loaded — one algorithm, one meaning.
+            local container="$1" blob_name="$2" tmp status=0
+            tmp="$(mktemp)"
+            az storage blob download \
+              --account-name "$STORAGE_ACCOUNT" --auth-mode login \
+              --container-name "$container" --name "$blob_name" \
+              --file "$tmp" --overwrite >/dev/null 2>&1 || status=$?
+            if [ "$status" -eq 0 ]; then
+              sha256sum < "$tmp" | cut -d' ' -f1
+            fi
+            rm -f "$tmp"
+          }
+
+          upload_asset() {
+            local label="$1"
+            local blob_ref="$2"
+            # The key GET /version reports this asset under. The manifest is
+            # keyed on it, so the two halves (what git holds, what the process
+            # loaded) are joined on a name both sides agree about. This spine
+            # has no such loaders — see the in-service step below — but a
+            # solution that adds them must register these exact keys.
+            local asset_key="$3"
+            [ -z "$blob_ref" ] && return 0
+            DECLARED_COUNT=$((DECLARED_COUNT + 1))
+            # Defence in depth (#491): only safe path components. Rejects any '..'
+            # traversal and anything outside [A-Za-z0-9._-] separated by single
+            # slashes, so a compromised clients-config value cannot escape the
+            # assets dir, forge a container name, or smuggle metacharacters into
+            # the az calls below.
+            if [[ "$blob_ref" == *..* ]] || ! [[ "$blob_ref" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
+              echo "::error::Refusing unsafe branding blob ref: $blob_ref"
+              exit 1
+            fi
+            local container blob_name
+            if [[ "$blob_ref" == */* ]]; then
+              container="${blob_ref%%/*}"
+              blob_name="${blob_ref#*/}"
+            else
+              container="client-branding"
+              blob_name="$blob_ref"
+            fi
+            local src="../clients-config-assets/assets/${blob_name}"
+            # Record the declaration before classifying it, so the sweep below
+            # sees every declared ref regardless of which branch this ref takes.
+            DECLARED_REFS="${DECLARED_REFS}${container}/${blob_name}"$'\n'
+            local already=0 seen_container
+            for seen_container in "${SCAN_CONTAINERS[@]}"; do
+              if [ "$seen_container" = "$container" ]; then already=1; fi
+            done
+            if [ "$already" -eq 0 ]; then SCAN_CONTAINERS+=("$container"); fi
+            local presence state note live_digest committed_digest
+            presence="$(blob_presence "$container" "$blob_name")"
+
+            if [ ! -f "$src" ]; then
+              case "$presence" in
+                yes)
+                  # The defect, made visible. clients-config declares this ref,
+                  # no asset backs it, and a blob is serving anyway: it was
+                  # hand-uploaded, exists in no repo, and this deploy cannot
+                  # reproduce it.
+                  state="UNMANAGED"
+                  note="serving a blob that exists in no repo"
+                  UNMANAGED_COUNT=$((UNMANAGED_COUNT + 1))
+                  echo "::warning::${label}: ${container}/${blob_name} is UNMANAGED — declared in clients-config, not committed under assets/${blob_name}, but a blob is serving. This deploy cannot reproduce it (#531)."
+                  ;;
+                no)
+                  state="ABSENT"
+                  note="nothing committed, nothing deployed; app falls back"
+                  echo "${label}: ${container}/${blob_name} declared but absent everywhere — the app falls back."
+                  ;;
+                *)
+                  state="UNREADABLE"
+                  note="could not read the container; classification unavailable"
+                  UNREADABLE_COUNT=$((UNREADABLE_COUNT + 1))
+                  echo "::warning::${label}: could not determine whether ${container}/${blob_name} exists. This is NOT evidence that it is absent (#531)."
+                  ;;
+              esac
+              ROWS="${ROWS}| ${label} | \`${container}/${blob_name}\` | ${state} | ${note} |"$'\n'
+              return 0
+            fi
+
+            committed_digest="$(sha256sum < "$src" | cut -d' ' -f1)"
+            # This deploy knows the bytes this ref is supposed to have, so the
+            # running app can be held to them.
+            printf '%s\t%s\n' "$asset_key" "$committed_digest" >> "$EXPECTED_MANIFEST"
+            case "$presence" in
+              yes)
+                live_digest="$(deployed_digest "$container" "$blob_name")"
+                if [ -z "$live_digest" ]; then
+                  state="ADOPTED"; note="a blob was serving but could not be read to compare"
+                elif [ "$live_digest" = "$committed_digest" ]; then
+                  state="IN SYNC"; note="deployed blob already matches the committed asset"
+                else
+                  state="DRIFTED"; note="deployed blob differed from git and has been overwritten from it"
+                  echo "::warning::${label}: ${container}/${blob_name} DRIFTED from the committed asset and was overwritten from git (#531)."
+                fi
+                ;;
+              no)
+                state="CREATED"; note="no blob was serving; uploaded from git"
+                ;;
+              *)
+                state="UPLOADED"; note="could not read the container beforehand; uploaded from git"
+                UNREADABLE_COUNT=$((UNREADABLE_COUNT + 1))
+                ;;
+            esac
+
+            # Anything but IN SYNC changes what a reader of this blob gets, and
+            # the revision has been running since `terraform apply` — so it read
+            # the OLD bytes. ADOPTED counts too: it means the previous content
+            # could not be read, so "unchanged" is precisely what is not known,
+            # and the safe reading of an unknown is that it changed.
+            if [ "$state" != "IN SYNC" ]; then
+              CHANGED_COUNT=$((CHANGED_COUNT + 1))
+            fi
+
+            echo "Uploading ${src} -> ${container}/${blob_name} (${state})"
+            az storage blob upload \
+              --account-name "$STORAGE_ACCOUNT" --auth-mode login \
+              --container-name "$container" --name "$blob_name" \
+              --file "$src" --overwrite
+            ROWS="${ROWS}| ${label} | \`${container}/${blob_name}\` | ${state} | ${note} |"$'\n'
+          }
+
+          # Third argument is the key GET /version reports the asset under, so
+          # the manifest written above joins to what the app says it loaded.
+          upload_asset "logo" "$CLIENT_LOGO_BLOB" "logo"
+          upload_asset "reference-check template" "$REFERENCE_CHECK_TEMPLATE_BLOB" "reference_check_template"
+          upload_asset "candidate summary style" "$CANDIDATE_SUMMARY_STYLE_BLOB" "candidate_summary_style"
+          upload_asset "theme" "$CLIENT_THEME_BLOB" "theme"
+
+          # Reconcile by DECLARATION, not only against declarations (#531).
+          # Everything above classifies refs clients-config declares, so a blob
+          # nobody declares is invisible to it however wrong it is — a live rig
+          # carried an entire undeclared prefix, uploaded once and referenced by
+          # no config in either repo. Sweep the containers we touched and report
+          # what is serving there without a declaration behind it.
+          #
+          # Only branding containers are swept. A solution's delivered-document
+          # containers hold per-run output, which is not declared in
+          # clients-config and must not be: reporting every delivered document
+          # as UNDECLARED would bury the finding this exists to surface.
+          for scan_container in "${SCAN_CONTAINERS[@]}"; do
+            if ! scan_names=$(az storage blob list \
+                                --account-name "$STORAGE_ACCOUNT" --auth-mode login \
+                                --container-name "$scan_container" \
+                                --query "[].name" -o tsv 2>/dev/null); then
+              # Not "nothing undeclared" — the same distinction blob_presence
+              # keeps. A sweep that could not run must not read as a clean one.
+              UNREADABLE_COUNT=$((UNREADABLE_COUNT + 1))
+              ROWS="${ROWS}| (sweep) | \`${scan_container}/*\` | UNREADABLE | could not list the container; undeclared blobs are NOT ruled out |"$'\n'
+              echo "::warning::Could not list ${scan_container} — undeclared blobs cannot be ruled out (#531)."
+              continue
+            fi
+            while IFS= read -r scan_name; do
+              [ -z "$scan_name" ] && continue
+              case "$DECLARED_REFS" in
+                *$'\n'"${scan_container}/${scan_name}"$'\n'*) continue ;;
+              esac
+              UNDECLARED_COUNT=$((UNDECLARED_COUNT + 1))
+              # A swept name is the only UNTRUSTED string in this step. Declared
+              # refs pass the safe-path guard in upload_asset; this one comes
+              # back from the storage account and carries whatever Azure accepted
+              # when the blob was written. Two sinks care: GitHub parses a leading
+              # `::` on a log line as a workflow command, and the job summary is
+              # rendered markdown. Report the name through a strict allowlist so
+              # neither sink can be steered — matching still uses the raw name, so
+              # only the DISPLAY is lossy (a space becomes '?').
+              scan_display=$(printf '%s' "$scan_name" | tr -c 'A-Za-z0-9._/-' '?')
+              ROWS="${ROWS}| (sweep) | \`${scan_container}/${scan_display}\` | UNDECLARED | serving, but no clients-config ref points at it |"$'\n'
+              echo "::warning::${scan_container}/${scan_display} is UNDECLARED — a blob is serving that no clients-config ref points at, so nothing manages or reproduces it (#531)."
+            done <<< "$scan_names"
+          done
+
+          {
+            echo "### Branding asset reconciliation (#531)"
+            echo ""
+            echo "| asset | blob | state | notes |"
+            echo "|---|---|---|---|"
+            printf '%s' "$ROWS"
+            echo ""
+            echo "Declared refs classified: ${DECLARED_COUNT}."
+            if [ "$UNMANAGED_COUNT" -gt 0 ]; then
+              echo ""
+              echo "**${UNMANAGED_COUNT} UNMANAGED.** A blob is serving that exists in no repo, so this"
+              echo "deploy cannot reproduce it and nothing versions it. Report-only today; see #531."
+            fi
+            if [ "$UNDECLARED_COUNT" -gt 0 ]; then
+              echo ""
+              echo "**${UNDECLARED_COUNT} UNDECLARED.** Blobs are serving that no clients-config ref"
+              echo "points at, so the classification above says nothing about them. Report-only; see #531."
+            fi
+            if [ "$UNREADABLE_COUNT" -gt 0 ]; then
+              echo ""
+              echo "**${UNREADABLE_COUNT} could not be read.** Those rows are not evidence of absence."
+            fi
+            if [ "$CHANGED_COUNT" -gt 0 ]; then
+              echo ""
+              echo "**${CHANGED_COUNT} changed AFTER the revision started.** \`terraform apply\` created"
+              echo "and started the revision before this step ran, so a solution that caches branding"
+              echo "at startup read the PREVIOUS bytes. The next step restarts it and the one after"
+              echo "that verifies what is actually in service (#531) — until those pass, the rows"
+              echo "above describe the STORE, not the SERVICE."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Reconciliation: ${DECLARED_COUNT} declared, ${UNMANAGED_COUNT} unmanaged, ${UNDECLARED_COUNT} undeclared, ${UNREADABLE_COUNT} unreadable, ${CHANGED_COUNT} changed after the revision started."
+
+          # Hand the next two steps what they need. restart_required is what the
+          # restart keys off; expected_manifest_written says the manifest file
+          # exists at the agreed path, so the verification knows it has something
+          # to assert against. The manifest's CONTENTS may still be empty (no ref
+          # had a committed asset) — that is the verifier's own "nothing to
+          # prove" case, which it must report rather than pass.
+          #
+          # This publishes a BOOLEAN, never the path (#536). The path is a
+          # constant both steps derive from RUNNER_TEMP; keeping it off the step
+          # boundary is what the contract test pins.
+          {
+            if [ "$CHANGED_COUNT" -gt 0 ]; then
+              echo "restart_required=true"
+            else
+              echo "restart_required=false"
+            fi
+            echo "changed_assets=${CHANGED_COUNT}"
+            echo "expected_manifest_written=true"
+          } >> "${GITHUB_OUTPUT:-/dev/null}"
+
+          RECONCILE_STATUS="ok"
+
+      # ── Put the branding into SERVICE, then prove it (#531, rrc#906) ───────────
+      # `terraform apply` (step above) creates and STARTS the revision; the
+      # branding upload runs after it. A solution that caches branding at startup
+      # behind loaders that never raise therefore serves the PRE-upload bytes:
+      # the deploy that installs a customer's branding is exactly the deploy that
+      # does not serve it — silently, and self-healing on whatever deploy or
+      # restart happens next, which is why it survived in rrc for so long.
+      #
+      # Restarting the active revision(s) re-runs startup against the blobs as
+      # they are now. Only when something actually changed: an IN SYNC deploy
+      # loaded the right bytes at startup already, and a restart per deploy would
+      # be a needless rollout.
+      #
+      # A restart is sufficient HERE and is not a general rule. It works because
+      # the APP downloads these blobs itself, in its own startup, so a fresh
+      # process reads current content. It would NOT work for a Key Vault secret
+      # reference: those are resolved and cached at REVISION scope, so a restart
+      # re-serves the same cached value and only a new revision re-resolves it.
+      # Do not reach for this step as the fix for that class.
+      - name: Restart the revision so the new branding is served (#531)
+        if: ${{ steps.branding.outputs.restart_required == 'true' && inputs.mode != 'onboard-identities' }}
+        working-directory: infra
+        env:
+          CHANGED_ASSETS: ${{ steps.branding.outputs.changed_assets }}
+        run: |
+          set -euo pipefail
+          APP=$(terraform output -raw container_app_name)
+          RG=$(terraform output -raw resource_group_name)
+          echo "${CHANGED_ASSETS} branding asset(s) changed after the revision started — restarting so startup re-reads them."
+
+          # Every ACTIVE revision, not just the latest: in single-revision mode
+          # that is the one serving, and in multiple-revision mode every revision
+          # taking traffic has the same stale cache. Selecting "the latest" would
+          # quietly leave the others serving the old artwork.
+          REVISIONS=$(az containerapp revision list \
+            --name "$APP" --resource-group "$RG" \
+            --query "[?properties.active].name" -o tsv)
+          if [ -z "$REVISIONS" ]; then
+            echo "::error::No active revision found for ${APP} — cannot put the uploaded branding into service. Refusing to report this deploy as having installed branding it is not serving (#531)." >&2
+            exit 1
+          fi
+          while IFS= read -r rev; do
+            [ -z "$rev" ] && continue
+            echo "Restarting revision ${rev}"
+            az containerapp revision restart --name "$APP" --resource-group "$RG" --revision "$rev"
+          done <<< "$REVISIONS"
+
+      # The half that is otherwise missing. Everything upstream reports the end
+      # state of the STORE; this asks the RUNNING PROCESS what it actually loaded
+      # and holds it to the bytes committed in git. Runs whether or not a restart
+      # was needed — "the blob was already in sync" is a claim about the blob, and
+      # a revision that failed to read it at all looks identical from up here.
+      #
+      # THIS SPINE HAS NO SERVICE HALF. Nothing in src/ reads the branding blobs,
+      # so GET /version reports no `branding` field and the script's honest answer
+      # is `unverifiable` (exit 2 -> a warning annotation, never a pass and never a
+      # failure). That is deliberate: shipping the store half while staying quiet
+      # about the missing service half is what would be wrong, because a check that
+      # cannot fire looks exactly like a check that passes. A solution that consumes
+      # branding writes the service half (see docs/new-solution-setup.md) and the
+      # guard arms itself the day it does.
+      # The gate is the reconciliation's own "I wrote the manifest" boolean, and
+      # the path is derived independently from the same RUNNER_TEMP constant the
+      # reconciliation used (#536) — no filesystem path crosses the boundary.
+      # Both halves are pinned by tests, because getting either wrong SKIPS this
+      # step silently, which is the failure mode it exists to prevent: a check
+      # that cannot fire looks exactly like a check that passes.
+      - name: Verify the running app is serving this branding (#531)
+        if: ${{ steps.branding.outputs.expected_manifest_written == 'true' && inputs.mode != 'onboard-identities' }}
+        working-directory: infra
+        env:
+          EXPECTED_MANIFEST: ${{ runner.temp }}/branding-expected-manifest.tsv
+        run: |
+          set -euo pipefail
+          FQDN=$(terraform output -raw container_app_fqdn)
+          SCRIPT=../scripts/verify-branding-in-service.py
+
+          # `python3 missing.py` exits 2. So does argparse on a usage error. That
+          # is the SAME code the script uses for `unverifiable`, so mapping a bare
+          # 2 to success makes "the check could not run at all" indistinguishable
+          # from "the check ran and honestly could not verify" — the exact defect
+          # class this step exists to close, rebuilt inside the step that closes
+          # it. Guard it from both ends: refuse up front if the script is not
+          # there, and below require the script's OWN verdict before honouring a 2.
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::${SCRIPT} is missing — the in-service check cannot run. Refusing to report a check that never ran as one that reported (#531)." >&2
+            exit 1
+          fi
+
+          RC=0
+          STDERR="$(mktemp)"
+          python3 "$SCRIPT" \
+            --version-url "https://${FQDN}/version" \
+            --expected "${EXPECTED_MANIFEST}" \
+            --summary-file "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>"$STDERR" || RC=$?
+          cat "$STDERR" >&2
+
+          # 2 is the honest third state: the running image does not report
+          # branding at all, so this deploy could NOT be verified. It is annotated
+          # as a warning by the script and is explicitly not a pass. Any other
+          # non-zero is a real mismatch and fails the deploy.
+          if [ "$RC" -eq 2 ]; then
+            if grep -q "Branding in service not verified" "$STDERR"; then
+              exit 0
+            fi
+            echo "::error::The in-service check exited 2 without reporting a verdict, which is the interpreter failing (a missing script, a usage error), not an honest 'unverifiable'. Refusing to treat it as a pass (#531)." >&2
+            exit 1
+          fi
+          exit "$RC"
+
+      # Seed the real Anthropic API key from the CI secret so the app can make LLM
+      # calls without a manual Key Vault edit. Terraform seeds a placeholder (and
+      # ignores value changes on later applies), so this overwrites it in place.
+      # Idempotent — safe to re-run on every deploy. A solution that uses other
+      # secrets (e.g. provider endpoints, webhooks) seeds them alongside this.
+      - name: Seed Anthropic API key
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        working-directory: infra
+        env:
+          _ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$_ANTHROPIC_API_KEY" ]; then
+            echo "WARNING: ANTHROPIC_API_KEY secret is empty — leaving the Key Vault placeholder."
+            echo "Set the ANTHROPIC_API_KEY repo secret and re-run before sending traffic."
+            exit 0
+          fi
+          KV_NAME=$(terraform output -raw key_vault_name)
+          echo "Seeding real anthropic-api-key into $KV_NAME"
+          az keyvault secret set \
+            --vault-name "$KV_NAME" --name "anthropic-api-key" \
+            --value "$_ANTHROPIC_API_KEY" \
+            --output none
+
+      # azure_openai: ensure azure-foundry-endpoint holds the REAL endpoint the app
+      # dials with its MI token. Mirrors the anthropic-api-key seeding above (the
+      # Terraform placeholder ignores value changes, so this overwrites it in place).
+      # Skipped entirely for anthropic/foundry, which never read AZURE_FOUNDRY_ENDPOINT.
+      #
+      # provision_foundry → the openai-account module already wrote the real
+      # custom-subdomain endpoint during apply; do NOT let a (possibly stale) config
+      # value clobber it — only validate what is in Key Vault. Otherwise resolve the
+      # endpoint from config, else the regional Cognitive Services default. The app
+      # dials this URL carrying candidate/referee PII, so a malformed/hostile value
+      # is an SSRF seed — validate the EFFECTIVE endpoint whatever its source before
+      # seeding. Ported from solution-recruitment-reference-check (proven live).
+      - name: Seed Azure Foundry endpoint (azure_openai)
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        working-directory: infra
+        env:
+          MATRIX_LLM_PROVIDER: ${{ matrix.llm_provider }}
+          MATRIX_PROVISION_FOUNDRY: ${{ matrix.provision_foundry }}
+          MATRIX_AZURE_FOUNDRY_ENDPOINT: ${{ matrix.azure_foundry_endpoint }}
+          MATRIX_REGION: ${{ matrix.region }}
+        run: |
+          if [ "$MATRIX_LLM_PROVIDER" != "azure_openai" ]; then
+            echo "llm_provider is $MATRIX_LLM_PROVIDER — no Azure Foundry endpoint to seed."
+            exit 0
+          fi
+          KV_NAME=$(terraform output -raw key_vault_name)
+
+          # SEED_ENDPOINT is what gets written (empty = don't write); FOUNDRY_ENDPOINT
+          # is the effective value that MUST validate regardless of where it came from.
+          if [ "$MATRIX_PROVISION_FOUNDRY" = "true" ]; then
+            # The module wrote the real endpoint during apply — validate, never seed.
+            FOUNDRY_ENDPOINT=$(az keyvault secret show \
+              --vault-name "$KV_NAME" --name azure-foundry-endpoint \
+              --query "value" -o tsv 2>/dev/null || echo "")
+            SEED_ENDPOINT=""
+            if [ -z "$FOUNDRY_ENDPOINT" ] || [ "$FOUNDRY_ENDPOINT" = "PLACEHOLDER-UPDATE-BEFORE-USE" ]; then
+              echo "::error::provision_foundry is set but azure-foundry-endpoint is unset/placeholder — the openai-account module did not write it. Check the apply output." >&2
+              exit 1
+            fi
+          else
+            FOUNDRY_ENDPOINT="$MATRIX_AZURE_FOUNDRY_ENDPOINT"
+            SEED_ENDPOINT="$FOUNDRY_ENDPOINT"
+            if [ -z "$FOUNDRY_ENDPOINT" ]; then
+              # Config omits the endpoint. Never clobber a real value seeded out-of-band
+              # (MI auth needs the custom-subdomain host) — only fall back to the
+              # regional default when the secret is empty or still the placeholder.
+              EXISTING_ENDPOINT=$(az keyvault secret show \
+                --vault-name "$KV_NAME" --name azure-foundry-endpoint \
+                --query "value" -o tsv 2>/dev/null || echo "")
+              if [ -n "$EXISTING_ENDPOINT" ] && [ "$EXISTING_ENDPOINT" != "PLACEHOLDER-UPDATE-BEFORE-USE" ]; then
+                echo "azure-foundry-endpoint already set out-of-band — keeping (and validating) existing value"
+                FOUNDRY_ENDPOINT="$EXISTING_ENDPOINT"
+                SEED_ENDPOINT=""
+              else
+                FOUNDRY_ENDPOINT="https://${MATRIX_REGION}.api.cognitive.microsoft.com/"
+                SEED_ENDPOINT="$FOUNDRY_ENDPOINT"
+              fi
+            fi
+          fi
+
+          if ! printf '%s' "$FOUNDRY_ENDPOINT" | grep -Eq '^https://[a-zA-Z0-9._-]+\.(cognitive\.microsoft\.com|cognitiveservices\.azure\.com|services\.ai\.azure\.com|openai\.azure\.com)(/.*)?$'; then
+            echo "::error::Refusing to use azure-foundry-endpoint: '$FOUNDRY_ENDPOINT' is not a valid https Azure Foundry / Cognitive Services endpoint." >&2
+            exit 1
+          fi
+          if [ -n "$SEED_ENDPOINT" ]; then
+            echo "Seeding azure-foundry-endpoint ($SEED_ENDPOINT) into $KV_NAME"
+            az keyvault secret set \
+              --vault-name "$KV_NAME" --name azure-foundry-endpoint \
+              --value "$SEED_ENDPOINT" --output none
+          fi
+
+      - name: Smoke test
+        if: ${{ inputs.mode != 'onboard-identities' }}
+        id: smoke
+        run: |
+          FQDN=$(cd infra && terraform output -raw container_app_fqdn)
+          echo "fqdn=$FQDN" >> "$GITHUB_OUTPUT"
+          echo "Smoke testing https://$FQDN/health"
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "https://$FQDN/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: status=$STATUS — waiting 15s"
+            sleep 15
+          done
+          echo "ERROR: health check did not return 200 after 5 attempts"
+          exit 1
+
+      # Deeper acceptance for the STAGING tier only. This is the "tests pass" gate:
+      # release-staging.yml only marks the image promotable (mints the signature)
+      # if the whole staging deploy job — this step included — succeeds. Prod does
+      # NOT re-run it; it ships the exact image this validated. Runs
+      # scripts/staging-acceptance.sh if present; otherwise the health smoke above
+      # is the gate.
+      #
+      # Absence is LOUD, not permissive. Until rrc#1057 this read
+      # `if [ -x scripts/staging-acceptance.sh ]; then … else echo "no script" fi`,
+      # so losing the exec bit — or renaming or deleting the file — silently
+      # downgraded the certification gate to the health smoke while the run stayed
+      # green in both places. A gate that did not run looked exactly like a gate
+      # that passed. Every solution cloned from this template inherits
+      # scripts/staging-acceptance.sh, and the file is repo-local (every caller is
+      # `uses: ./.github/workflows/reusable-deploy.yml`), so a missing or
+      # non-executable script is a mistake, never an intention. A solution that
+      # genuinely has no acceptance suite makes that a deliberate edit here, with a
+      # note saying what certifies its images instead.
+      - name: Staging acceptance tests
+        if: ${{ matrix.environment == 'staging' && inputs.mode != 'onboard-identities' }}
+        env:
+          BASE_URL: https://${{ steps.smoke.outputs.fqdn }}
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/staging-acceptance.sh ]; then
+            echo "::error title=Staging acceptance script missing::scripts/staging-acceptance.sh is not present. This step certifies the image production ships without re-running it, so an absent acceptance suite fails the deploy rather than falling back to the health smoke (rrc#1057)."
+            exit 1
+          fi
+          if [ ! -x scripts/staging-acceptance.sh ]; then
+            echo "::error title=Staging acceptance script is not executable::scripts/staging-acceptance.sh exists with mode $(stat -c '%a' scripts/staging-acceptance.sh) and cannot be run. Restore the exec bit with: git update-index --chmod=+x scripts/staging-acceptance.sh (rrc#1057)."
+            exit 1
+          fi
+          echo "Running scripts/staging-acceptance.sh against $BASE_URL"
+          scripts/staging-acceptance.sh "$BASE_URL"
+          # Say that it RAN, in the job summary rather than 300 lines down the log.
+          # Whether layer-1 acceptance happened is the one thing a promote decision
+          # rests on, and it should not need a log archaeology dig to answer.
+          echo "Layer-1 staging acceptance: RAN (scripts/staging-acceptance.sh against $BASE_URL)" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Layer-2 acceptance: the real functional E2E (staging only) ─────────────
+      # Layer 1 above (staging-acceptance.sh) is secret-less liveness + auth
+      # boundary. Layer 2 fires ONE real pipeline run at this freshly-deployed
+      # instance and BLOCKS unless the run's success line is confirmed in Log
+      # Analytics. Because mark-staging-ok (in release-staging.yml) needs this
+      # job, a failure here means staging-ok is never signed and promote fails
+      # closed — no green E2E, no promotable image. It runs in the deploy job so
+      # it reuses the deploy identity's Azure auth (correct sub/tenant), the
+      # terraform outputs, and Key Vault access — no cross-job OIDC re-auth
+      # needed. The solution defines its request + success signal in
+      # scripts/staging-e2e-hooks.sh (see scripts/staging-e2e.sh); until that
+      # exists the driver skips and Layer 1 remains the gate.
+      - name: Layer-2 staging E2E gate (real pipeline run)
+        if: ${{ matrix.environment == 'staging' && inputs.mode != 'onboard-identities' }}
+        env:
+          RUN_MARKER: gh${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          # Production-class clients must have a real Layer-2 hook — the driver
+          # fails closed instead of skipping when this is 'production'.
+          ENVIRONMENT_CLASS: ${{ matrix.environment_class }}
+        run: |
+          # github.run_id is a GitHub-assigned monotonic integer — never
+          # attacker-influenced, even from a fork PR — but RUN_MARKER (built
+          # from it above) flows into the E2E driver's HTTP request body and
+          # KQL query, so validate its format explicitly here rather than rely
+          # on that guarantee implicitly.
+          if ! printf '%s' "$RUN_ID" | grep -qE '^[0-9]+$'; then
+            echo "::error::github.run_id ('${RUN_ID}') is not purely numeric; refusing to build RUN_MARKER from it." >&2
+            exit 1
+          fi
+          FQDN=$(terraform -chdir=infra output -raw container_app_fqdn)
+          KV=$(terraform -chdir=infra output -raw key_vault_name)
+          APP=$(terraform -chdir=infra output -raw container_app_name)
+          WSID=$(terraform -chdir=infra output -raw log_analytics_customer_id)
+          SUBID=$(az account show --query id -o tsv)
+          export BASE_URL="https://$FQDN"
+          export KEY_VAULT_NAME="$KV"
+          export CONTAINERAPP_NAME="$APP"
+          export LOG_ANALYTICS_WORKSPACE_ID="$WSID"
+          export SUBSCRIPTION="$SUBID"
+          bash scripts/staging-e2e.sh
+
+      # $RUNNER_TEMP is per-job and the runner clears it between jobs, but delete
+      # the credential explicitly anyway (rrc#939, back-ported under #468): not
+      # leaving an org PAT lying about is the entire point, and "the runner will
+      # probably tidy up" is exactly the assumption that put it in ~/.gitconfig in
+      # the first place. always() so a failed deploy cleans up too — that is the run
+      # most likely to leave state behind. Keep this LAST in the job.
+      - name: Remove the module-fetch credential
+        if: always()
+        run: |
+          if [ -n "${GIT_CONFIG_GLOBAL:-}" ]; then
+            rm -f "$GIT_CONFIG_GLOBAL"
+            echo "Removed $GIT_CONFIG_GLOBAL"
+          else
+            echo "GIT_CONFIG_GLOBAL was never set — nothing to remove."
+          fi
