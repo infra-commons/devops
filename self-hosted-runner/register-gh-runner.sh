@@ -51,7 +51,7 @@
 # competing with the live one for the same _work dir. See step 4.
 #
 # Auth for token auto-fetch: a gh authed with admin on the repo/org, e.g.
-#   GH_CONFIG_DIR=/home/kev/.config/gh-rolliq ./register-gh-runner.sh ...
+#   GH_CONFIG_DIR=~/.config/gh-rolliq ./register-gh-runner.sh ...
 set -euo pipefail
 
 ORG='' REPO='' LABEL='' USER_RUN='' TOKEN='' GROUP='' EPHEMERAL=0
