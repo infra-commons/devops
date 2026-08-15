@@ -406,10 +406,11 @@ jobs:
               # Deployment model (topology axis). client_owned is the production
               # norm: it runs in the CUSTOMER's own tenant (customer-tenant Terraform
               # state backend + resource-provider registration bootstrapped by the
-              # deploy job via the platform-iac composite actions, cross-tenant OIDC,
-              # and a customer-tenant ACR the image is imported into). rolliq_managed
-              # is Rolliq-internal environments only (rolliq-test / sandbox / demos):
-              # it runs in a Rolliq subscription and pulls from Rolliq's central ACR
+              # deploy job via this repo's own vendored composite actions (devops#23),
+              # cross-tenant OIDC, and a customer-tenant ACR the image is imported
+              # into). rolliq_managed is Rolliq-internal environments only
+              # (rolliq-test / sandbox / demos): it runs in a Rolliq subscription and
+              # pulls from Rolliq's central ACR
               # (cross-subscription AcrPull, same tenant), and never holds customer
               # PII. Both are provisioned by this template. The absent-model fallback
               # is client_owned (fail-safe: a client_owned client with no tenant_id
@@ -999,10 +1000,20 @@ jobs:
       # apply. Both are idempotent no-ops on later deploys and are resilient to
       # first-deploy cross-tenant OIDC propagation lag. rolliq_managed uses Rolliq's
       # central state backend + an already-registered subscription, so it skips both.
+      # Vendored into this repo (infra-commons/devops#23): GitHub only shares a
+      # private repo's actions with same-org callers via the default
+      # GITHUB_TOKEN, never cross-org, so a rolliq-com/platform-iac-hosted
+      # action could never be invoked by a caller outside that org. Both
+      # actions below were copied verbatim from platform-iac's own pinned SHAs
+      # (see the PR that landed this comment for exact provenance) — a pure
+      # relocation, not a behavior change.
+      #
+      # NOTE: pin the action ref to this repo's merge SHA after first merge
+      # (matches the adversarial-review convention). @main is used pre-merge.
       - name: Bootstrap Terraform state backend (client_owned)
         id: state-backend
         if: ${{ matrix.model == 'client_owned' }}
-        uses: rolliq-com/platform-iac/.github/actions/bootstrap-tfstate-backend@c5105fb85bb78caf1bb3e99bf5feee2fb2109fa2 # v0.4.16
+        uses: infra-commons/devops/.github/actions/bootstrap-tfstate-backend@main
         with:
           client-slug:     ${{ matrix.client_slug }}
           subscription-id: ${{ matrix.subscription_id }}
@@ -1016,9 +1027,11 @@ jobs:
       # (platform-iac/scripts/provision-subscription.sh). Idempotent no-op on the
       # worn rolliq_managed path (a shared, already-registered subscription). Only
       # these two models exist; the explicit gate documents intent.
+      # NOTE: pin the action ref to this repo's merge SHA after first merge
+      # (matches the adversarial-review convention). @main is used pre-merge.
       - name: Register required resource providers (fresh subscription)
         if: ${{ matrix.model == 'client_owned' || matrix.model == 'rolliq_managed' }}
-        uses: rolliq-com/platform-iac/.github/actions/register-resource-providers@1a3225425cd1ebc636c7d952ecfb8251b96842a2 # v0.4.17
+        uses: infra-commons/devops/.github/actions/register-resource-providers@main
         with:
           subscription-id: ${{ matrix.subscription_id }}
 

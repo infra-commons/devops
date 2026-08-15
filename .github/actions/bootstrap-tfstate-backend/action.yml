@@ -1,0 +1,79 @@
+name: Bootstrap Terraform state backend (client_owned)
+description: >-
+  Provision the Terraform remote-state backend (resource group + storage account
+  + blob container) in a client_owned customer's OWN Azure tenant, before
+  `terraform init`. Idempotent (a no-op on later deploys) and resilient to
+  first-deploy cross-tenant OIDC propagation lag via an authenticated retry loop.
+  The calling job must have `permissions: id-token: write` and be logged in to the
+  target subscription as the deployer service principal.
+
+inputs:
+  client-slug:
+    description: "Client slug (used to compose default resource names, e.g. 'kin')"
+    required: true
+  subscription-id:
+    description: "Customer subscription ID the state backend is created in"
+    required: true
+  region:
+    description: "Azure region for the state resource group + storage account (e.g. australiaeast)"
+    required: true
+  azure-client-id:
+    description: "Deployer service principal (application) client ID — used to re-login between retries"
+    required: true
+  azure-tenant-id:
+    description: "Customer tenant ID the deployer SP federates into"
+    required: true
+  state-resource-group:
+    description: "Override the state resource group name (default: rg-<client-slug>-tfstate)"
+    required: false
+    default: ""
+  state-storage-account:
+    description: "Override the state storage account name (default: sttfstate<client-slug-without-dashes>; must be 3-24 lowercase alphanumeric)"
+    required: false
+    default: ""
+  container-name:
+    description: "Blob container that holds the state files"
+    required: false
+    default: "tfstate"
+  max-attempts:
+    description: "Max bootstrap attempts before failing (covers first-deploy OIDC propagation)"
+    required: false
+    default: "30"
+  retry-seconds:
+    description: "Seconds to wait between transient-error retries"
+    required: false
+    default: "30"
+
+outputs:
+  state-storage-account:
+    description: "Resolved state storage account name — feed to `terraform init -backend-config=storage_account_name=`"
+    value: ${{ steps.bootstrap.outputs.state-storage-account }}
+  state-resource-group:
+    description: "Resolved state resource group name"
+    value: ${{ steps.bootstrap.outputs.state-resource-group }}
+  container-name:
+    description: "Resolved state blob container name"
+    value: ${{ steps.bootstrap.outputs.container-name }}
+
+runs:
+  using: composite
+  steps:
+    - id: bootstrap
+      shell: bash
+      env:
+        CLIENT_SLUG:     ${{ inputs.client-slug }}
+        SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        REGION:          ${{ inputs.region }}
+        AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
+        AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
+        STATE_RG:        ${{ inputs.state-resource-group }}
+        STATE_SA:        ${{ inputs.state-storage-account }}
+        CONTAINER_NAME:  ${{ inputs.container-name }}
+        MAX_ATTEMPTS:    ${{ inputs.max-attempts }}
+        RETRY_SECONDS:   ${{ inputs.retry-seconds }}
+      run: |
+        # Blank optional overrides must fall back to the script's own defaults,
+        # so unset them rather than passing an empty string that would win.
+        if [ -z "${STATE_RG}" ]; then unset STATE_RG; fi
+        if [ -z "${STATE_SA}" ]; then unset STATE_SA; fi
+        bash "$GITHUB_ACTION_PATH/bootstrap.sh"

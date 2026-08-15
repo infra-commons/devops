@@ -44,6 +44,16 @@ jobs:
       TF_STATE_STORAGE_ACCOUNT: ${{ secrets.TF_STATE_STORAGE_ACCOUNT }}
 ```
 
+**The `deploy` job's two Azure-bootstrap steps use composite actions vendored in this repo**
+(`.github/actions/bootstrap-tfstate-backend`, `.github/actions/register-resource-providers`),
+not `rolliq-com/platform-iac`. They used to live there; `infra-commons/devops#23` moved them here
+because GitHub only shares a private repo's actions with same-org callers via the default
+`GITHUB_TOKEN`, never cross-organization — a canonical reusable that only one entity org's callers
+could invoke wasn't canonical in any useful sense. `PLATFORM_IAC_TOKEN` above is unrelated to that
+move: it authenticates Terraform's own HTTPS fetch of `platform-iac`'s Terraform *modules* (a
+PAT-authenticated git fetch, not a `GITHUB_TOKEN`-gated Actions call), which stays a legitimate
+cross-org dependency.
+
 **Pin to an immutable SHA, not to a branch.** Decided for this extraction specifically (not the
 general infra-commons default, which is unsettled across older reusables — see below): a hard SHA
 pin per caller, not `@main` and not a moving tag. With exactly two callers today, a SHA bump is two
