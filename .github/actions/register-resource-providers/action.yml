@@ -1,0 +1,33 @@
+name: Register Azure resource providers
+description: >-
+  Register (and verify) the Azure resource-provider namespaces a solution's
+  Terraform needs in a customer subscription, before `terraform apply`. A
+  brand-new subscription leaves most providers unregistered, so the first apply
+  fails with 409 MissingSubscriptionRegistration; this registers the exact set
+  up-front. Idempotent and fail-closed (verifies every namespace reached
+  Registered). The calling job must be logged in as a deployer SP with
+  Contributor (which includes */register/action) on the subscription.
+
+inputs:
+  subscription-id:
+    description: "Subscription ID whose resource providers are registered"
+    required: true
+  namespaces:
+    description: >-
+      Whitespace- or newline-separated list of provider namespaces to register.
+      Defaults to the standard Rolliq container-app + postgres + key-vault +
+      log-analytics + storage + ACR + monitoring set.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        NAMESPACES:      ${{ inputs.namespaces }}
+      run: |
+        # Blank input must fall back to the script's default set.
+        if [ -z "${NAMESPACES}" ]; then unset NAMESPACES; fi
+        bash "$GITHUB_ACTION_PATH/register.sh"
