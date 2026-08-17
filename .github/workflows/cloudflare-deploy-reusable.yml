@@ -46,7 +46,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install wrangler
         run: npm install -g "wrangler@${{ inputs.wrangler_version }}"
@@ -57,8 +57,20 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.cloudflare_account_id }}
           DEPLOY_ENV: ${{ inputs.environment }}
         run: |
-          if [ "$DEPLOY_ENV" = "staging" ]; then
-            wrangler deploy --env staging
-          else
-            wrangler deploy
-          fi
+          # Only "staging" and "production" are meaningful (per the input's own
+          # description). Anything else — a typo, wrong case, a stray space —
+          # used to fall through to the else branch and deploy to PRODUCTION
+          # with no warning. Enumerate explicitly instead of defaulting the
+          # unrecognized case to the more dangerous path.
+          case "$DEPLOY_ENV" in
+            staging)
+              wrangler deploy --env staging
+              ;;
+            production)
+              wrangler deploy
+              ;;
+            *)
+              echo "::error::environment must be 'staging' or 'production', got '$DEPLOY_ENV'"
+              exit 1
+              ;;
+          esac

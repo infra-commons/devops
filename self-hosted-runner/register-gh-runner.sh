@@ -114,11 +114,18 @@ else
   # the org, so demand a runner group that is restricted and public-repo-denied.
   say "== runner-group check (org scope) =="
   [ -n "$GROUP" ] || refuse_rce "org-level registration needs --group naming a runner group restricted to selected repos. Without one, this runner serves EVERY repo in ${ORG}, public ones included."
-  GROUPS="$(gh api "orgs/${ORG}/actions/runner-groups" \
-              --jq '.runner_groups[] | [.name, .visibility, (.allows_public_repositories|tostring)] | @tsv' 2>/dev/null)" || GROUPS=''
+  # NOT named GROUPS: bash reserves that as a special read-only-ish array (the
+  # calling process's own supplementary group IDs). Assigning to it is silently
+  # discarded and `$GROUPS` still reads back the process's GIDs instead of the
+  # API response, so the match below would run against "1000 24 27 ..." and
+  # never find a real runner group by name — permanently refusing even a
+  # correctly configured one, which trains an operator to reach for
+  # --i-understand-public instead. Verified with `GROUPS="x"; echo "$GROUPS"`.
+  RUNNER_GROUPS="$(gh api "orgs/${ORG}/actions/runner-groups" \
+              --jq '.runner_groups[] | [.name, .visibility, (.allows_public_repositories|tostring)] | @tsv' 2>/dev/null)" || RUNNER_GROUPS=''
   # Match in shell, not in the jq filter, so an operator-supplied name is never
   # interpolated into a jq program.
-  GLINE="$(printf '%s\n' "$GROUPS" | awk -F'\t' -v g="$GROUP" '$1 == g {print; exit}')"
+  GLINE="$(printf '%s\n' "$RUNNER_GROUPS" | awk -F'\t' -v g="$GROUP" '$1 == g {print; exit}')"
   [ -n "$GLINE" ] || refuse_rce "could not confirm runner group '$GROUP' exists in ${ORG} (needs an org-admin gh, and the group must already exist)."
   GVIS="$(printf '%s' "$GLINE" | cut -f2)"
   GPUB="$(printf '%s' "$GLINE" | cut -f3)"

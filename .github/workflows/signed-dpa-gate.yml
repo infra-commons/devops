@@ -234,14 +234,21 @@ jobs:
                               "add the date the disclosed sub-processor list was last accurate"
                           )
                       else:
-                          sp_date = datetime.date.fromisoformat(str(sp_str))
-                          age_days = (datetime.date.today() - sp_date).days
-                          if age_days > max_age:
+                          try:
+                              sp_date = datetime.date.fromisoformat(str(sp_str))
+                          except ValueError:
                               errors.append(
-                                  f"client '{slug}' sub_processors_current_as_of is {age_days} days old "
-                                  f"(max {max_age} days) — the DPA sub-processor disclosure is stale; "
-                                  "issue a change notice or update the DPA before deploying"
+                                  f"client '{slug}' 'contracts.dpa.sub_processors_current_as_of' "
+                                  f"is {sp_str!r} — not a valid ISO date (YYYY-MM-DD)"
                               )
+                          else:
+                              age_days = (datetime.date.today() - sp_date).days
+                              if age_days > max_age:
+                                  errors.append(
+                                      f"client '{slug}' sub_processors_current_as_of is {age_days} days old "
+                                      f"(max {max_age} days) — the DPA sub-processor disclosure is stale; "
+                                      "issue a change notice or update the DPA before deploying"
+                                  )
 
           if errors:
               for e in errors:

@@ -102,6 +102,22 @@ jobs:
           print(f"{a:>12}: {sorted(set_a) or '(none)'}")
           print(f"{b:>12}: {sorted(set_b) or '(none)'}")
 
+          # `success: true` with a response shape this script does not recognize
+          # (e.g. `result`/`deployment_configs` renamed, or a non-Direct-Upload
+          # project) collapses `configs` to {} the same way a genuinely-unconfigured
+          # project would, and both sides then compare equal at zero vars — reading
+          # exactly the schema drift this check exists to catch as "parity
+          # confirmed". Two real environments with zero vars each is implausible
+          # enough that treating it as ambiguous, not clean, is the safer read.
+          if not set_a and not set_b:
+              print(f"\n::error::Both '{a}' and '{b}' show ZERO env vars. That is either "
+                    f"a project with no vars configured in either environment (dashboard "
+                    f"check needed) or this script no longer matches the Cloudflare API's "
+                    f"response shape (e.g. 'result'/'deployment_configs' changed) — either "
+                    f"way this is not a confirmed match. Refusing to report OK on an unread "
+                    f"comparison.")
+              sys.exit(1)
+
           only_a = sorted(set_a - set_b)
           only_b = sorted(set_b - set_a)
 
