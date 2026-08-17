@@ -397,10 +397,20 @@ def _():
         ("tags is a string", {"tags": "internal", "contracts": {"dpa": {"status": "self_attested"}}}),
         ("version is null", with_dpa(SIGNED, version=None)),
         ("signed_date is null", with_dpa(SIGNED, signed_date=None)),
+        ("sub_processors_current_as_of is not a date", with_dpa(SIGNED, sub_processors_current_as_of="TBD")),
+        ("sub_processors_current_as_of is wrong format", with_dpa(SIGNED, sub_processors_current_as_of="2024/01/01")),
     ]
     for label, doc in hostile:
         verdict, output = run_gate(doc)
         assert verdict != CRASHED, f"{label} crashed the gate:\n{output}"
+
+
+@test("a malformed sub_processors_current_as_of is rejected, not crashed or ignored")
+def _():
+    out = assert_rejected(
+        with_dpa(SIGNED, sub_processors_current_as_of="TBD"), "unparseable disclosure date"
+    )
+    assert "TBD" in out, out
 
 
 def main():

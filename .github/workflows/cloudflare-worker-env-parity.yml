@@ -93,6 +93,21 @@ jobs:
           print(f"{a:>28}: {sorted(set_a) or '(none)'}")
           print(f"{b:>28}: {sorted(set_b) or '(none)'}")
 
+          # `success: true` with a response shape this script does not recognize
+          # (e.g. `result` renamed or restructured) collapses `secret_names()` to
+          # the empty set the same way a genuinely-secret-free script would, and
+          # both sides then compare equal at zero — reading exactly the schema
+          # drift this check exists to catch as "parity confirmed". Two real
+          # scripts with zero secrets each is implausible enough that treating it
+          # as ambiguous, not clean, is the safer read.
+          if not set_a and not set_b:
+              print(f"\n::error::Both '{a}' and '{b}' show ZERO secrets. That is either "
+                    f"two scripts with none configured (dashboard check needed) or this "
+                    f"script no longer matches the Cloudflare API's response shape (e.g. "
+                    f"'result' changed) — either way this is not a confirmed match. "
+                    f"Refusing to report OK on an unread comparison.")
+              sys.exit(1)
+
           only_a = sorted(set_a - set_b)
           only_b = sorted(set_b - set_a)
 

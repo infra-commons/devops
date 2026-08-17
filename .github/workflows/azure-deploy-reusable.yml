@@ -1233,7 +1233,18 @@ jobs:
         id: alerts
         working-directory: infra
         run: |
-          if terraform state list 2>/dev/null | grep -q '^module\.container_app\.azurerm_container_app\.this$'; then
+          # A `terraform state list` failure (backend read hiccup, auth blip) must
+          # not be indistinguishable from "resource genuinely not in state yet" —
+          # `2>/dev/null | grep -q` swallowed exactly that distinction, silently
+          # deferring alerting on an already-provisioned prod app whenever the
+          # command itself failed for any reason. Check the command's own exit
+          # status, not grep's.
+          if ! state_output=$(terraform state list 2>&1); then
+            echo "::error::terraform state list failed — cannot determine alerting state:"
+            echo "$state_output"
+            exit 1
+          fi
+          if echo "$state_output" | grep -q '^module\.container_app\.azurerm_container_app\.this$'; then
             echo "enable_alerts=true" >> "$GITHUB_OUTPUT"
             echo "Container App already in state -> enabling Azure Monitor alert rules"
           else
@@ -1281,6 +1292,26 @@ jobs:
       - name: Terraform plan
         if: ${{ inputs.mode != 'onboard-identities' }}
         working-directory: infra
+        # llm_model_{sonnet,haiku,opus}, azure_openai_api_version, foundry_account_id,
+        # and the four *_blob refs are free text from clients-config with no regex
+        # validation (unlike client_slug/tier/region/environment/model/operations/
+        # llm_provider above, which are all regex- or enum-checked in load-matrix) —
+        # the same "less-trusted repo" data the branding-upload step below this one
+        # explicitly warns must never be spliced into a run: body with ${{ }}, since
+        # backticks/$()/; would be interpreted as shell by a runner holding ARM
+        # creds + CLIENTS_CONFIG_TOKEN. Passed via TF_VAR_* env instead, which
+        # Terraform reads natively with no -var flag needed — the shell never
+        # touches these values as anything but inert environment data.
+        env:
+          TF_VAR_llm_model_sonnet: ${{ matrix.llm_model_sonnet }}
+          TF_VAR_llm_model_haiku: ${{ matrix.llm_model_haiku }}
+          TF_VAR_llm_model_opus: ${{ matrix.llm_model_opus }}
+          TF_VAR_azure_openai_api_version: ${{ matrix.azure_openai_api_version }}
+          TF_VAR_foundry_account_id: ${{ matrix.foundry_account_id }}
+          TF_VAR_candidate_summary_style_blob: ${{ matrix.candidate_summary_style_blob }}
+          TF_VAR_client_logo_blob: ${{ matrix.client_logo_blob }}
+          TF_VAR_reference_check_template_blob: ${{ matrix.reference_check_template_blob }}
+          TF_VAR_client_theme_blob: ${{ matrix.client_theme_blob }}
         run: |
           terraform plan -out=tfplan \
             -var="enable_alerts=${{ steps.alerts.outputs.enable_alerts }}" \
@@ -1296,16 +1327,7 @@ jobs:
             -var="zero_retention=${{ matrix.zero_retention }}" \
             -var="rolliq_management_subscription_id=${{ vars.AZURE_MANAGEMENT_SUBSCRIPTION_ID }}" \
             -var="llm_provider=${{ matrix.llm_provider }}" \
-            -var="llm_model_sonnet=${{ matrix.llm_model_sonnet }}" \
-            -var="llm_model_haiku=${{ matrix.llm_model_haiku }}" \
-            -var="llm_model_opus=${{ matrix.llm_model_opus }}" \
-            -var="azure_openai_api_version=${{ matrix.azure_openai_api_version }}" \
-            -var="foundry_account_id=${{ matrix.foundry_account_id }}" \
             -var="provision_foundry=${{ matrix.provision_foundry }}" \
-            -var="candidate_summary_style_blob=${{ matrix.candidate_summary_style_blob }}" \
-            -var="client_logo_blob=${{ matrix.client_logo_blob }}" \
-            -var="reference_check_template_blob=${{ matrix.reference_check_template_blob }}" \
-            -var="client_theme_blob=${{ matrix.client_theme_blob }}" \
             -var-file="tiers/${{ matrix.tier }}.tfvars"
 
       - name: Terraform apply

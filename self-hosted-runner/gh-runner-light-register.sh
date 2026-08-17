@@ -94,9 +94,12 @@ if [ -n "$REPO" ]; then
 else
   say "== runner-group check (org scope) =="
   [ -n "$GROUP" ] || refuse "org scope needs --group. Without a restricted group this runner serves EVERY repo in ${ORG}, public ones included."
-  GROUPS="$(gh api "orgs/${ORG}/actions/runner-groups" \
-              --jq '.runner_groups[] | [.name, .visibility, (.allows_public_repositories|tostring)] | @tsv' 2>/dev/null)" || GROUPS=''
-  GLINE="$(printf '%s\n' "$GROUPS" | awk -F'\t' -v g="$GROUP" '$1 == g {print; exit}')"
+  # NOT named GROUPS: bash reserves that as a special read-only-ish array (the
+  # calling process's own supplementary group IDs) — see register-gh-runner.sh
+  # for the full explanation of the collision this avoids.
+  RUNNER_GROUPS="$(gh api "orgs/${ORG}/actions/runner-groups" \
+              --jq '.runner_groups[] | [.name, .visibility, (.allows_public_repositories|tostring)] | @tsv' 2>/dev/null)" || RUNNER_GROUPS=''
+  GLINE="$(printf '%s\n' "$RUNNER_GROUPS" | awk -F'\t' -v g="$GROUP" '$1 == g {print; exit}')"
   [ -n "$GLINE" ] || refuse "could not confirm runner group '$GROUP' exists in ${ORG} (needs an org-admin gh; create the group first — see the header)."
   GVIS="$(printf '%s' "$GLINE" | cut -f2)"
   GPUB="$(printf '%s' "$GLINE" | cut -f3)"

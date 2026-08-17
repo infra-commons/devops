@@ -52,8 +52,10 @@ jobs:
           echo "Pages:  $PAGES_JSON"
 
           FAIL=0
+          TESTED=0
 
           while IFS= read -r path; do
+            TESTED=$((TESTED + 1))
             path=$(echo "$path" | tr -d '"')
             url="${BASE_URL}${path}"
             success=false
@@ -77,6 +79,19 @@ jobs:
               FAIL=1
             fi
           done < <(echo "$PAGES_JSON" | python3 -c "import sys,json; [print(p) for p in json.load(sys.stdin)]")
+
+          # `pages: '[]'` is valid JSON and a valid input per the workflow_call
+          # contract, and malformed JSON makes the python3 decoder above exit
+          # non-zero with no stdout — process substitution's exit status is not
+          # checked by `while`/`done` (it isn't a pipe segment, so `pipefail`
+          # doesn't cover it either), so either way the loop above silently runs
+          # zero iterations. Without this, that reads as "All smoke tests passed"
+          # on a required check having verified nothing.
+          if [ "$TESTED" -eq 0 ]; then
+            echo ""
+            echo "::error::No pages were tested — 'pages' input decoded to zero paths (empty array, or malformed JSON the decoder above rejected). This check verified nothing; treat it as failed, not passed."
+            exit 1
+          fi
 
           if [ "$FAIL" -eq 1 ]; then
             echo ""

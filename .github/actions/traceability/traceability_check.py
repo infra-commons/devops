@@ -232,7 +232,20 @@ def run_traceability(api_key: str, requirements: str, adrs: str, codebase: str) 
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
             )
-            return message.content[0].text
+            text = message.content[0].text
+            if message.stop_reason == "max_tokens":
+                # A truncated report posted verbatim reads as complete — a
+                # reviewer sees no "Misalignments" section and reads that as
+                # "none found" rather than "cut off before reaching it". Advisory
+                # or not, that's the exact degraded-result-read-as-clean shape
+                # this check is supposed to help catch, reproduced in itself.
+                text += (
+                    "\n\n> ⚠️ **This report was cut off** — the model hit its "
+                    "output-length limit before finishing. Sections after the "
+                    "cutoff are missing, not clean; an absent finding past this "
+                    "point is not confirmation there isn't one."
+                )
+            return text
         except anthropic.RateLimitError:
             if attempt == 2:
                 raise
