@@ -1,0 +1,44 @@
+name: Security review gate self-test
+
+# The Security review gate decides whether ANY deploy (test/staging/prod) may proceed, and
+# until now nothing tested it — it had also never been observed to fail. A gate that cannot
+# fail is indistinguishable from one that passes.
+#
+# scripts/test_security_review_gate.py executes the verification program lifted out of
+# azure-deploy-reusable.yml's "Security review gate" step itself, so this job tests the
+# shipped artefact rather than a copy that can quietly drift away from it. Most of the
+# suite is negative controls: scenarios that MUST be rejected, asserted to be rejected —
+# matching this repo's other critical-gate self-test, dpa-gate-self-test.yml. Unlike that
+# one, this script is stdlib-only (no PyYAML), so no dependency install step is needed.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/azure-deploy-reusable.yml"
+      - ".github/workflows/security-review-gate-self-test.yml"
+      - "scripts/test_security_review_gate.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/azure-deploy-reusable.yml"
+      - ".github/workflows/security-review-gate-self-test.yml"
+      - "scripts/test_security_review_gate.py"
+
+concurrency:
+  group: security-review-gate-self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  self-test:
+    name: Gate negative controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the gate's negative controls
+        run: python3 scripts/test_security_review_gate.py

@@ -24,7 +24,8 @@ jobs:
   deploy:
     permissions:
       contents: read
-      id-token: write   # a called workflow cannot hold more than its caller grants
+      id-token: write     # a called workflow cannot hold more than its caller grants
+      pull-requests: read # Security review gate verifies a PASS row's cited PR via the API
     uses: infra-commons/devops/.github/workflows/azure-deploy-reusable.yml@<SHA>
     with:
       allowed_class: test
@@ -64,11 +65,49 @@ reusable's same-repo local predecessor: every secret is named explicitly, matchi
 convention (`cloudflare-deploy-reusable.yml`, `auto-assign-reusable.yml`) rather than the
 same-repo-only convenience rrc's and the template's local callers used.
 
-Every job's `permissions:` requests only `contents: read` and `id-token: write` — grant exactly
-that on the calling job, nothing more. A caller that grants less gets `startup_failure`: **no
-check-run at all**, not a red one, which on a required check reads as an unmergeable PR rather than
-a failing one. See `infra-commons/devops#18`/`#19` and this repo's `reusable-caller-docs.yml`, which
-checks that this file's own header snippet (above) stays correct.
+Every job's `permissions:` requests only `contents: read`, `id-token: write`, and (`deploy` only)
+`pull-requests: read` — grant exactly that on the calling job, nothing more. A caller that grants
+less gets `startup_failure`: **no check-run at all**, not a red one, which on a required check reads
+as an unmergeable PR rather than a failing one. See `infra-commons/devops#18`/`#19` and this repo's
+`reusable-caller-docs.yml`, which checks that this file's own header snippet (above) stays correct.
+
+## Security review gate
+
+The `deploy` job's "Security review gate" step blocks every deploy (test/staging/prod alike) until
+`docs/SECURITY-REVIEW.md` in the caller's own checkout carries a passing review for the solution
+named in `SOLUTION.yaml`. Format-hardening (HTML comment/fenced-block stripping, `#472`-class
+table-boundary parsing so two adjacent tables can't pair a Solution row from one with a Result row
+from the other) has always lived here; as of `infra-commons/devops`'s finding-10 fix it additionally
+**authenticates who wrote the PASS row**, not just its text (a PASS row is otherwise just markdown —
+anyone able to land a commit on the deployed branch could write it, and this repo cannot see the
+caller's own branch-protection/CODEOWNERS configuration).
+
+A winning review table must now carry a third field alongside `Solution` and `Result`:
+
+```
+| Reviewed-in | #123 |
+```
+
+naming the pull request whose approving review authorised the PASS. The gate verifies, via the
+GitHub API (`pull-requests: read`, above — no extra secret needed, `github.token` is already scoped
+to the calling repo):
+
+- the PR is merged;
+- its diff actually touches `docs/SECURITY-REVIEW.md` (closes a laundering path: without this, one
+  unreviewed direct-pushed edit could cite any later, unrelated, genuinely-approved PR number,
+  since the file wouldn't need to change again);
+- the file in the current checkout is **byte-identical** (git blob SHA1) to the file as it stood at
+  that PR — pinned to the exact approved artifact, the same logic the cosign digest check above uses
+  for images, not a mutable pointer;
+- the PR carries an `APPROVED` review from a GitHub login other than its own author.
+
+**What this does not close:** it cannot confirm the approver was a qualified reviewer or a
+CODEOWNER for this file — any collaborator with review-approve rights on the calling repo
+satisfies it. CODEOWNERS/branch-protection enforcement of *who* may approve, and reviewer
+diligence generally, remain the calling repo's responsibility, exactly as before. A solo-operator
+repo can still defeat "distinct login" with a second identity that rubber-stamps its own PRs. This
+moves the trust boundary from "arbitrary file content" to "an independently-verified merged,
+approved PR" — it does not remove the calling repo's own governance from the picture.
 
 **One org-admin prerequisite, tracked separately (`infra-commons/meta#583`):** the `build` job's
 `azure/login` step needs `azure/login@*` in infra-commons' own org Actions allow-list. Actions used
@@ -134,6 +173,13 @@ Run it locally: `python3 scripts/test_azure_deploy_reusable.py`. Also run
 file's header caller-pattern snippet — it fails the same way (loudly, before merge) that a
 `startup_failure` would fail silently in a real caller's run.
 
+`scripts/test_security_review_gate.py` covers the Security review gate step specifically (the
+`Reviewed-in` PR verification described above), extracting and executing the shipped step's own
+program rather than a re-implementation — see that file's docstring. Unlike the two checks above,
+it's wired into CI (`.github/workflows/security-review-gate-self-test.yml`, PR-triggered on the
+relevant paths) rather than manual-only: a CRITICAL security gate gets the same "run it, don't just
+read it" guarantee `signed-dpa-gate.yml`'s `dpa-gate-self-test.yml` already gives that gate.
+
 ## Changing the reusable
 
 Two checks currently guard this file, both stdlib-only and run directly (this repo carries no
@@ -143,6 +189,9 @@ Two checks currently guard this file, both stdlib-only and run directly (this re
    grantable from the header's own documented caller snippet.
 2. `python3 scripts/test_azure_deploy_reusable.py` — no `run:` block may drift toward the expression
    cap, and any large expression-free block must keep declaring itself as such.
+3. `python3 scripts/test_security_review_gate.py` — the Security review gate's PR verification
+   (merged, touches the file, hash-pinned, distinctly approved) must still fail closed on every
+   negative control; also wired into CI, see above.
 
 Adding a new caller-specific hardening layer (the follow-on PRs described above): copy the step(s)
 verbatim from whichever source repo has them, wrap the copied step(s) in `if: inputs.enable_<name>`
