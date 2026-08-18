@@ -70,12 +70,15 @@ The tool matrix and **why each is needed** (Ubuntu noble reference):
 ### Azure DevOps
 
 ```bash
-# short-lived PAT scoped **Agent Pools (Read & manage)** only — used once at config time
+# short-lived PAT scoped **Agent Pools (Read & manage)** only — used once at config time.
+# --project (repeatable) names every project you intend to share this pool with; the
+# script refuses unless each one is private with fork-PR builds disabled — see Security.
 ./register-ado-agent.sh \
   --org <ORG> \
   --pool <POOL_OR_LABEL> \
   --user <RUNNER_USER> \
-  --token <REGISTRATION_PAT>
+  --token <REGISTRATION_PAT> \
+  --project <PROJECT>
 ```
 
 What it does: downloads the current `vsts-agent-linux-x64` tarball, writes a `.env` that injects
@@ -164,8 +167,7 @@ Same one line, reversed:
 - A self-hosted runner that **compiles/runs CI code runs that code on your host.** Safe **only** for a
   **private repo with a trusted contributor set.**
 - **GitHub-specific and severe: NEVER attach a self-hosted runner to a public repo.** A fork PR can
-  run arbitrary code on the runner → RCE on your box. GitHub documents this explicitly. ADO's PR gate
-  carries the same principle, but GitHub's fork-PR exposure is a sharper edge.
+  run arbitrary code on the runner → RCE on your box. GitHub documents this explicitly.
 - **An ORG-LEVEL runner is reachable by every repo in the org, including public ones** — the same
   fork-PR RCE, one indirection away, and a per-repo visibility check cannot see it. So
   `register-gh-runner.sh` requires `--group` for org scope and verifies over the API that the group
@@ -174,6 +176,21 @@ Same one line, reversed:
   API error, a renamed repo, a token that cannot see the repo, a rate limit or broken `gh` auth all
   refuse. A non-answer is not evidence a repo is not public. `--i-understand-public` skips the gate
   entirely — it is an assertion about *your* host isolation, not a way around broken auth.
+- **ADO's model differs, so `register-ado-agent.sh`'s gate checks a different pair of things — not a
+  port of the GitHub gate.** ADO fork-PR builds don't get secrets by default regardless of project
+  visibility (an admin opts in separately via "Make secrets available to builds of forks"), so
+  visibility alone would miss the actual attack-relevant signal. The gate instead requires, per
+  `--project`: visibility `private`, **and** the project's pipeline general settings field
+  `buildsEnabledForForks` = `false` — the ADO-native "build PRs from forks" toggle, which gates
+  whether a fork PR can run code on the pool's agents at all, independent of secrets (arbitrary code
+  execution from an untrusted contributor is a real risk on its own — network/host pivot, resource
+  abuse, whatever local state the agent process holds). Both fields are read via `az devops` and the
+  gate fails closed the same way as GitHub's: an unreadable project, an unreadable setting, a missing
+  `az`/extension, or no `--project` at all all refuse rather than being read as "not exposed".
+  `--i-understand-public` skips it the same way. **Residual gap:** an ADO agent pool is shared into
+  projects by a separate manual UI step (see registration above) that can happen *after* this script
+  runs — a project added to the pool later is not covered by that run's gate and needs its own
+  `--project` check.
 - Prefer **ephemeral, single-job runners** (GitHub); scope registration tokens least-privilege;
   isolate the runner OS user; consider a dedicated host/VM for org-level runners.
 - ADO dev/prod pipelines run already-merged code → lower risk than a PR-build gate that compiles
@@ -241,4 +258,9 @@ Same one line, reversed:
     already serving that directory. The result was **two services racing for the same `_work` dir**. The
     script now detects an existing manager (`.service` marker, a live `Runner.Listener` for that dir, or
     a user unit whose `ExecStart`/`WorkingDirectory` references it) and skips the install with a note.
+13. **`register-ado-agent.sh`'s exposure gate needs a SEPARATE `az` auth from `--token`.** `--token` is
+    a narrow, short-lived PAT scoped to Agent Pools only and cannot read project visibility or pipeline
+    settings. The gate uses the ambient `az` CLI instead (`az extension add --name azure-devops` +
+    `az login`, or `AZURE_DEVOPS_EXT_PAT`) with read access to Projects and Pipelines in each
+    `--project`. Without it, the gate fails closed and refuses — see Security.
     If you *want* to move a runner between services, stop and remove the old one first.

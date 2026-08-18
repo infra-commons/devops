@@ -14,7 +14,7 @@ paid for.
 |---|---|
 | [`runbook.md`](runbook.md) | The full org-agnostic runbook — both platforms, parameterized on `{org, repo, pool/label, host, user}`. Prereqs → register → switch → verify → rollback → security → gotchas. |
 | [`provision-host.sh`](provision-host.sh) | Idempotent host bootstrap. Installs the tool matrix (.NET, pwsh, Azure CLI, Cypress/Chrome+Xvfb, python-venv). `--apply` to run; dry-run by default. |
-| [`register-ado-agent.sh`](register-ado-agent.sh) | Thin wrapper around ADO `config.sh` + `svc.sh` — resolves the latest agent tarball, writes the `.env`, installs the systemd service. |
+| [`register-ado-agent.sh`](register-ado-agent.sh) | Thin wrapper around ADO `config.sh` + `svc.sh` — resolves the latest agent tarball, writes the `.env`, installs the systemd service. Gated on `--project`: refuses unless the project is private and has fork-PR builds (`buildsEnabledForForks`) disabled. |
 | [`register-gh-runner.sh`](register-gh-runner.sh) | Thin wrapper around GitHub `actions/runner` `config.sh` + `svc.sh` — fetches a registration token, supports repo/org level + `--ephemeral`. |
 | [`gh-runner-group-setup.sh`](gh-runner-group-setup.sh) | Creates/verifies the restricted org runner group (`visibility=selected`, `allows_public_repositories=false`) an org-level runner must live in — the same public-repo guard as `register-gh-runner.sh`, enforced one layer up so the group can't drift unsafe between runs. Needs an admin credential; dry-run by default. |
 | [`gh-runner-light-register.sh`](gh-runner-light-register.sh) | Finishes registering a pre-staged runner slot into an existing restricted group — same visibility/group gate as `register-gh-runner.sh`, plus a preflight that refuses an already-configured or unstaged slot. Needs an admin credential; dry-run by default. |
@@ -28,7 +28,8 @@ paid for.
 ./provision-host.sh --apply
 
 # 2a. register an ADO agent...
-./register-ado-agent.sh --org <ORG> --pool <POOL> --user <USER> --token <REGISTRATION_PAT>
+./register-ado-agent.sh --org <ORG> --pool <POOL> --user <USER> --token <REGISTRATION_PAT> \
+                         --project <PROJECT>
 # 2b. ...or a GitHub Actions runner
 ./register-gh-runner.sh --org <ORG> --repo <REPO> --label <LABEL> --user <USER> --ephemeral
 
