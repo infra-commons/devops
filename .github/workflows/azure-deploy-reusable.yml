@@ -71,7 +71,8 @@ name: Deploy — Azure Container Apps (reusable)
 #     deploy:
 #       permissions:
 #         contents: read
-#         id-token: write   # a called workflow cannot hold more than its caller grants
+#         id-token: write     # a called workflow cannot hold more than its caller grants
+#         pull-requests: read # Security review gate verifies the PASS row's cited PR via the API
 #       uses: infra-commons/devops/.github/workflows/azure-deploy-reusable.yml@<SHA>
 #       with:
 #         allowed_class: test
@@ -624,8 +625,12 @@ jobs:
     environment: ${{ matrix.deploy_environment }}
 
     permissions:
-      id-token: write   # required for OIDC — do not remove
+      id-token: write     # required for OIDC — do not remove
       contents: read
+      pull-requests: read # Security review gate calls the GitHub API to verify the
+                           # PASS row's cited PR (merged, touches the file, approved
+                           # by someone other than its author) instead of trusting
+                           # the file's text alone (#815 finding 10)
 
     env:
       SOLUTION_NAME: ${{ needs.build.outputs.solution_name }}
@@ -813,13 +818,26 @@ jobs:
       # single `| Field | Value |` table, and a table cannot straddle a heading.
       #
       # Deliberately carries no ${{ }} — that is what lets
-      # tests/unit/test_security_review_gate.py execute this body verbatim. A gate
+      # scripts/test_security_review_gate.py execute this body verbatim. A gate
       # that passes for the wrong reason is indistinguishable from one that
-      # passed, so it is tested by running it, not by reading it.
+      # passed, so it is tested by running it, not by reading it. (github.token
+      # is wired below via env:, not interpolated into the script itself, so
+      # that property holds for the API verification too.)
+      #
+      # The parsing above proves the FILE contains a well-formed PASS row. It
+      # proves nothing about who put it there (#815 finding 10) — this repo
+      # cannot see the calling repo's branch protection or CODEOWNERS, and a
+      # PASS row is just text that anyone able to land a commit on this branch
+      # can write. So a winning row must also name a pull request this reusable
+      # can independently check via the GitHub API — see the block after
+      # `if winner:` below.
       - name: Security review gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 << 'EOF'
-          import re, sys
+          import hashlib, json, os, re, sys
+          import urllib.error, urllib.request
           from pathlib import Path
 
           CHECKLIST = "See docs/REVIEW-CHECKLIST.md for the review process."
@@ -933,10 +951,124 @@ jobs:
           if winner:
               rows, solution, result = winner
               date = next((v for k, v in rows if k in ("review date", "date")), "unspecified")
-              print("Security review gate: passing review found — proceeding.")
+
+              # ── AUTHENTICATE WHO WROTE THE PASS, not just the text (#815 finding 10) ──
+              # A PASS row must name the pull request whose approving review
+              # authorised it, and every fact below is checked via the GitHub API —
+              # never taken from the file itself. `github.token` is scoped to the
+              # CALLING repo (this reusable's run belongs to the caller, same as
+              # ${GITHUB_REPOSITORY} in the cosign step above), so this needs no
+              # extra secret plumbing, only `pull-requests: read` on the caller's
+              # job (documented in this file's header and in docs/azure-deploy.md).
+              ref = next((v for k, v in rows if k == "reviewed-in"), None)
+              ref_match = re.fullmatch(r'#?(\d+)', (ref or "").strip())
+              if not ref_match:
+                  fail(
+                      f"ERROR: the passing review for '{name}' has no valid 'Reviewed-in' PR reference.",
+                      "Add a `| Reviewed-in | #<PR number> |` row to the SAME table as the",
+                      "Solution and Result rows, naming the pull request whose approving",
+                      "review authorised this PASS. A PASS verdict is no longer accepted on",
+                      "file content alone.",
+                      CHECKLIST,
+                  )
+              pr_number = ref_match.group(1)
+
+              repo = os.environ.get("GITHUB_REPOSITORY", "")
+              token = os.environ.get("GITHUB_TOKEN", "")
+              api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+              if not repo or not token:
+                  fail(
+                      "ERROR: GITHUB_REPOSITORY/GITHUB_TOKEN not available to this step.",
+                      "Cannot verify the Reviewed-in PR without them — refusing to deploy",
+                      "rather than trusting the file's content unverified.",
+                  )
+
+              def gh_get(path):
+                  req = urllib.request.Request(
+                      f"{api}/repos/{repo}/{path}",
+                      headers={
+                          "Authorization": f"Bearer {token}",
+                          "Accept": "application/vnd.github+json",
+                          "X-GitHub-Api-Version": "2022-11-28",
+                      },
+                  )
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          return json.loads(r.read())
+                  except urllib.error.HTTPError as e:
+                      fail(
+                          f"ERROR: GitHub API call to {path!r} failed: HTTP {e.code}.",
+                          f"Cannot verify PR #{pr_number} — refusing to deploy rather than",
+                          "trusting the file's content unverified.",
+                      )
+                  except urllib.error.URLError as e:
+                      fail(
+                          f"ERROR: GitHub API unreachable ({path!r}): {e.reason}.",
+                          f"Cannot verify PR #{pr_number} — refusing to deploy rather than",
+                          "trusting the file's content unverified.",
+                      )
+
+              pr = gh_get(f"pulls/{pr_number}")
+              if not pr.get("merged"):
+                  fail(
+                      f"ERROR: PR #{pr_number} (cited as Reviewed-in for '{name}') is not merged.",
+                      "A PASS verdict must be backed by a merged, reviewed pull request.",
+                  )
+              author = (pr.get("user") or {}).get("login", "")
+
+              # Load-bearing, not redundant with the hash check below: without this,
+              # an attacker could land the fabricated row via ONE unreviewed commit,
+              # then cite any later, unrelated, genuinely-merged-and-approved PR
+              # number — the file wouldn't change again, so a content-hash check
+              # alone would still match. Confirming THIS PR's own diff touches the
+              # file closes that laundering path.
+              files = gh_get(f"pulls/{pr_number}/files?per_page=100")
+              entry = next((f for f in files if f.get("filename") == "docs/SECURITY-REVIEW.md"), None)
+              if entry is None or entry.get("status") == "removed":
+                  fail(
+                      f"ERROR: PR #{pr_number} does not modify docs/SECURITY-REVIEW.md.",
+                      "The Reviewed-in PR must be the PR whose diff introduced this exact",
+                      "review entry — citing an unrelated merged PR does not authorise this",
+                      "content.",
+                  )
+
+              # Pin to the exact artifact the PR approved, not a mutable pointer —
+              # the same logic the cosign digest-pinning above uses for images.
+              # GitHub's `files` endpoint already returns each entry's git blob
+              # SHA1, computed identically to `git hash-object` / `git rev-parse
+              # <sha>:<path>` (cross-checked against a live PR while writing this).
+              local_bytes = p.read_bytes()
+              local_blob_sha = hashlib.sha1(
+                  b"blob " + str(len(local_bytes)).encode() + b"\0" + local_bytes
+              ).hexdigest()
+              if entry.get("sha") != local_blob_sha:
+                  fail(
+                      f"ERROR: docs/SECURITY-REVIEW.md in this checkout does not match the",
+                      f"version in PR #{pr_number}. The file was edited after that PR's",
+                      "approval — that approval does not cover the CURRENT content.",
+                      "Refusing to deploy.",
+                  )
+
+              reviews = gh_get(f"pulls/{pr_number}/reviews?per_page=100")
+              approvers = {
+                  (rv.get("user") or {}).get("login", "")
+                  for rv in reviews
+                  if rv.get("state") == "APPROVED"
+              }
+              approvers.discard(author)
+              approvers.discard("")
+              if not approvers:
+                  fail(
+                      f"ERROR: PR #{pr_number} has no approving review from anyone other than",
+                      f"its author ({author or 'unknown'!r}). A PASS verdict requires an",
+                      "independent approving review, not just a merged PR.",
+                  )
+
+              print("Security review gate: passing, independently-verified review found — proceeding.")
               print(f"  Solution: {solution}")
               print(f"  Result:   {result}")
               print(f"  Reviewed: {date}")
+              print(f"  Approved in PR #{pr_number} by {', '.join(sorted(approvers))}")
               sys.exit(0)
 
           lines = [f"ERROR: docs/SECURITY-REVIEW.md has no passing review for '{name}'."]
