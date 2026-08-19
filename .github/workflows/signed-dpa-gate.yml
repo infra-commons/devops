@@ -41,15 +41,32 @@ name: Signed-DPA deploy gate (reusable)
 #       with:
 #         client_slug: ${{ inputs.client_slug }}
 #       secrets:
-#         clients_config_token: ${{ secrets.CLIENTS_CONFIG_READ_TOKEN }}
+#         # PREFERRED — the gate mints its own installation token per run.
+#         clients_config_app_id:      ${{ secrets.CLIENTS_CONFIG_APP_ID }}
+#         clients_config_private_key: ${{ secrets.CLIENTS_CONFIG_PRIVATE_KEY }}
+#         # LEGACY, still supported — pass this INSTEAD of the pair above.
+#         # clients_config_token: ${{ secrets.CLIENTS_CONFIG_READ_TOKEN }}
 #
 #     deploy-production:
 #       needs: dpa-gate
 #       ...
 #
-# Required secret in the calling org:
-#   CLIENTS_CONFIG_READ_TOKEN — a fine-grained PAT with `contents: read` on the
-#   clients-config repo (or a GitHub App installation token for that org).
+# Credentials in the calling org — supply EXACTLY ONE of:
+#
+#   1. CLIENTS_CONFIG_APP_ID + CLIENTS_CONFIG_PRIVATE_KEY (preferred) — a GitHub App
+#      installed on the OWNER of clients_config_repo with `contents: read` on it. The
+#      gate mints a fresh installation token itself, so there is nothing to expire and
+#      nothing to re-grant when a machine identity's org membership changes.
+#
+#   2. CLIENTS_CONFIG_READ_TOKEN (legacy) — a fine-grained PAT with `contents: read` on
+#      the clients-config repo, or an App installation token the caller minted itself.
+#
+# Why the caller cannot just mint one and pass it in as (2): this gate is invoked as a
+# `uses:` job, so no step can run before it, and minting in an EARLIER job then handing
+# the value over via `needs.*.outputs` does not work — create-github-app-token registers
+# its output as a secret, and GitHub silently drops any job output containing one, so the
+# gate would receive an empty string. The mint has to happen inside this workflow. That is
+# the whole reason option 1 exists.
 #
 # Resulting check name: "<caller_job_id> / dpa-gate"
 # Add it to required_status_checks to hard-block production deploys without a signed DPA.
@@ -79,11 +96,37 @@ on:
         type: number
         default: 365
     secrets:
+      # Two ways to authenticate, in this order of preference. Both are optional at the
+      # schema level and exactly one must actually arrive — see the fail-closed check in
+      # the first step below, which is what turns "neither supplied" into a legible error
+      # instead of a 404 that reads like a bad client_slug.
+      #
+      # `required: true` on the legacy secret was itself the trap: a caller could not add
+      # the App pair without also passing a secret this workflow refused to make optional,
+      # and could not drop it either, so a dead PAT could only be replaced by rotating it.
+      # That is why rolliq-com/solution-recruitment-reference-check's promote sat blocked
+      # with a working alternative it had no way to hand over (its own promote-to-production.yml
+      # carries the analysis, and a commented-out cross-job attempt that cannot work — see below).
+      clients_config_app_id:
+        description: >
+          App ID of a GitHub App installed on the clients_config_repo owner with
+          contents:read. Preferred over clients_config_token: an App-minted installation
+          token is created per run and cannot expire or outlive its identity's membership.
+        required: false
+      clients_config_private_key:
+        description: >
+          Private key for clients_config_app_id. Presence of THIS secret is what selects
+          the App path — the app id alone is a public identifier and does not.
+        required: false
       clients_config_token:
         description: >
-          GitHub token with contents:read on clients_config_repo.
-          A fine-grained PAT scoped to the clients-config repo is recommended.
-        required: true
+          LEGACY. A GitHub token with contents:read on clients_config_repo — a fine-grained
+          PAT, or an App installation token minted by the caller. Still fully supported, and
+          used whenever the App pair above is absent, so no existing caller needs to change.
+          Prefer the App pair for anything new: a PAT carries an expiry, and it also stops
+          working — silently, as a 404 — if its identity loses membership of the org that
+          owns clients_config_repo.
+        required: false
 
 permissions: {}
 
@@ -94,20 +137,89 @@ jobs:
     permissions:
       contents: read
 
+    env:
+      # Surfaced as env so the `if:` below can test them. `secrets` is not available in a
+      # step-level `if:` expression; env is. Same shape capture-findings-reusable.yml uses.
+      CC_APP_KEY: ${{ secrets.clients_config_private_key }}
+      CC_TOKEN: ${{ secrets.clients_config_token }}
+
     steps:
+      # Split owner/name once, here, rather than inline twice below. Note this mints against
+      # the owner of clients_config_repo, NOT github.repository_owner — this gate reads a
+      # DIFFERENT org's repo than the caller lives in, which is the one place it diverges from
+      # capture-findings-reusable.yml's otherwise-identical minting block.
+      - name: Resolve clients-config owner and name
+        id: cc
+        env:
+          REPO: ${{ inputs.clients_config_repo }}
+        run: |
+          if [[ "$REPO" != */* || "$REPO" == */*/* ]]; then
+            echo "::error::clients_config_repo must be exactly owner/name, got '${REPO}'"
+            exit 1
+          fi
+          echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${REPO##*/}"  >> "$GITHUB_OUTPUT"
+
+      - name: Mint clients-config token from the App pair
+        id: cc-token
+        if: ${{ env.CC_APP_KEY != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.clients_config_app_id }}
+          private-key: ${{ secrets.clients_config_private_key }}
+          owner: ${{ steps.cc.outputs.owner }}
+          repositories: ${{ steps.cc.outputs.name }}
+          # REQUIRED, not tidiness. `permission-*` inputs REPLACE the installation's grant
+          # rather than narrowing it additively, so omitting this mints a token with no
+          # contents access at all and the fetch below 404s exactly like the dead PAT did
+          # (infra-commons/meta#661).
+          permission-contents: read
+
+      # No `continue-on-error` here, deliberately — unlike capture-findings, where a failed
+      # mint degrades to skipping an optional board-add. This gate has nothing to degrade to:
+      # its whole job is to refuse a production promote without a signed DPA, so a mint that
+      # fails must fail the gate rather than fall through to the legacy branch and report a
+      # confusing downstream error.
+
       - name: Fetch client config
         env:
-          GH_TOKEN: ${{ secrets.clients_config_token }}
+          GH_TOKEN: ${{ steps.cc-token.outputs.token || secrets.clients_config_token }}
           REPO: ${{ inputs.clients_config_repo }}
           REF: ${{ inputs.clients_config_ref }}
           SLUG: ${{ inputs.client_slug }}
         run: |
-          HTTP=$(curl -sf -o client.yaml -w "%{http_code}" \
+          # Fail closed and legibly when NEITHER credential arrived. Both secrets are optional
+          # at the schema level (they have to be, or a caller can never migrate off the legacy
+          # one), so this is where "exactly one is required" is actually enforced. Without it an
+          # empty Bearer token produces the same 404 as a wrong slug.
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "::error::No clients-config credential supplied. Pass either the App pair (clients_config_app_id + clients_config_private_key, preferred) or the legacy clients_config_token."
+            exit 1
+          fi
+
+          # NOTE: no `-f`. GitHub runs `run:` under `bash -e`, so with `-f` curl exits non-zero
+          # on any HTTP error and the step dies AT THIS LINE — the diagnostics below never run
+          # and the operator gets a bare exit code instead. The explicit status check is the
+          # thing that reports, so curl must be allowed to return normally.
+          HTTP=$(curl -s -o client.yaml -w "%{http_code}" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github.raw+json" \
             "https://api.github.com/repos/${REPO}/contents/clients/${SLUG}.yaml?ref=${REF}")
+
+          if [[ "$HTTP" == "404" ]]; then
+            # A 404 here has TWO causes and they need opposite fixes. GitHub returns 404 rather
+            # than 403 when hiding a private repo from an identity that cannot see it, so a
+            # credential that is perfectly valid — unexpired, still authenticating — reads as
+            # "this file does not exist" the moment its identity loses membership of the org
+            # owning ${REPO}. That is exactly what took rolliq-com's promote down on 2026-08-19,
+            # and the previous version of this message sent the reader to check the slug and
+            # rotate the token, neither of which would have helped.
+            echo "::error::Cannot fetch clients/${SLUG}.yaml from ${REPO}@${REF} (HTTP 404). Two distinct causes: (a) the file genuinely is not there — check client_slug and clients_config_ref; or (b) the credential's identity cannot SEE ${REPO}, which GitHub reports as 404, not 403. For (b) rotating the token does not help — the identity needs access, or switch to the App pair (clients_config_app_id + clients_config_private_key) with the App installed on ${REPO}."
+            exit 1
+          fi
+
           if [[ "$HTTP" != "200" ]]; then
-            echo "::error::Cannot fetch clients/${SLUG}.yaml from ${REPO}@${REF} (HTTP ${HTTP}). Check client_slug and CLIENTS_CONFIG_READ_TOKEN."
+            echo "::error::Cannot fetch clients/${SLUG}.yaml from ${REPO}@${REF} (HTTP ${HTTP}). Check the clients-config credential's contents:read scope on that repo."
             exit 1
           fi
 
