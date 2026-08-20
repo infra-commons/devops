@@ -1,0 +1,58 @@
+name: Closing-keyword guard (reusable)
+
+# Canonical closing-keyword guard (infra-commons/meta#899): fails a PR whose body or
+# commit messages carry a GitHub closing keyword AND whose diff is documentation-only.
+# A docs-only PR delivers the decision a card describes, not the capability the card
+# asks for — closing the card on merge reads as finished and the follow-on work goes
+# unrescheduled. See infra-commons/meta#899 for the incident this closes.
+#
+# Caller pattern:
+#   jobs:
+#     closing-keyword-guard:
+#       uses: infra-commons/devops/.github/workflows/closing-keyword-guard-reusable.yml@<SHA> # pin to an immutable SHA
+#       permissions:
+#         contents: read
+#
+# The caller MUST grant the permission above (a called workflow may never hold more
+# permission than its caller; an omitted grant fails the run at startup with NO
+# check-run at all, not a red one). Resulting check: `<caller-job-id> / closing-keyword-guard`.
+# Blocking, not advisory — add it to required_status_checks to hard-enforce.
+#
+# Deliberately does NOT skip forks or Dependabot PRs, unlike traceability-reusable.yml.
+# Traceability skips them because it needs ANTHROPIC_API_KEY, which forks/Dependabot
+# never get. This guard needs no secret and makes no network call at all — it reads
+# $GITHUB_EVENT_PATH (already on disk for every job) and the local checkout. There is
+# nothing to skip *for*: the PR body isn't sensitive, the git history is already
+# public, and the failure mode this closes (a bad docs-only close) applies to a
+# Dependabot PR exactly as much as to any other.
+#
+# Escape hatch for the case where a document genuinely is the whole deliverable: add
+# the `doc-closes-card` label (create it once per repo) or the literal
+# `[doc-closes-card]` marker to the PR body.
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      docs_patterns:
+        description: >-
+          Comma-separated glob patterns, matched against each changed file's
+          basename, that count as documentation.
+        required: false
+        type: string
+        default: "*.md,*.mdx,*.markdown,*.rst,*.adoc,*.txt"
+
+jobs:
+  closing-keyword-guard:
+    name: closing-keyword-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # NOTE: pin the action ref to this repo's merge SHA after first merge
+      # (matches the traceability convention). @main is used pre-merge.
+      - uses: infra-commons/devops/.github/actions/closing-keyword-guard@main
+        with:
+          docs-patterns: ${{ inputs.docs_patterns }}

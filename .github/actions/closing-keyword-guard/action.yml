@@ -1,0 +1,34 @@
+name: Closing-keyword guard
+description: >-
+  Fails when a PR's body or commit messages carry a GitHub closing keyword (Closes,
+  Fixes, Resolves — any tense, including the cross-repo owner/repo#N form) AND the
+  diff between base and head is documentation-only, unless an explicit escape hatch
+  (the 'doc-closes-card' label, or a '[doc-closes-card]' marker in the PR body) is
+  present. A code PR closing its own card is expected behaviour and never fires.
+  Deterministic: no API key, no network call, no GitHub API read — reads
+  $GITHUB_EVENT_PATH (already on disk for every job) and the local checkout only.
+
+inputs:
+  docs-patterns:
+    description: >-
+      Comma-separated glob patterns, matched against each changed file's basename,
+      that count as documentation. A changed file matching none of these makes the
+      diff "mixed" and the guard never fires, regardless of any closing keyword.
+    required: false
+    default: "*.md,*.mdx,*.markdown,*.rst,*.adoc,*.txt"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        # Full history: the file diff is computed against merge-base(base, head), which
+        # needs both branches' history present locally, not just the head commit.
+        fetch-depth: 0
+
+    - name: Run closing-keyword guard
+      shell: bash
+      env:
+        DOCS_PATTERNS: ${{ inputs.docs-patterns }}
+      run: python3 "$GITHUB_ACTION_PATH/closing_keyword_guard.py"
