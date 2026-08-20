@@ -1,0 +1,46 @@
+name: Closing-keyword guard self-test
+
+# The closing-keyword guard decides whether a PR may merge, and until now nothing
+# tested it. scripts/test_closing_keyword_guard.py imports the module lifted out of
+# .github/actions/closing-keyword-guard/ directly, so this job tests the shipped
+# artefact rather than a copy that can quietly drift away from it. Most of the suite is
+# negative controls — a code PR closing its own card, an empty diff, a two-dot diff
+# standing in for the exact trap this guard exists to close — matching this repo's
+# other critical-gate self-tests (dpa-gate-self-test.yml,
+# security-review-gate-self-test.yml). Stdlib-only, no dependency install step needed.
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/closing-keyword-guard/action.yml"
+      - ".github/actions/closing-keyword-guard/closing_keyword_guard.py"
+      - ".github/workflows/closing-keyword-guard-reusable.yml"
+      - ".github/workflows/closing-keyword-guard-self-test.yml"
+      - "scripts/test_closing_keyword_guard.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/closing-keyword-guard/action.yml"
+      - ".github/actions/closing-keyword-guard/closing_keyword_guard.py"
+      - ".github/workflows/closing-keyword-guard-reusable.yml"
+      - ".github/workflows/closing-keyword-guard-self-test.yml"
+      - "scripts/test_closing_keyword_guard.py"
+
+concurrency:
+  group: closing-keyword-guard-self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  self-test:
+    name: Gate negative controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the guard's negative controls
+        run: python3 scripts/test_closing_keyword_guard.py
