@@ -35,7 +35,9 @@ import httpx
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 GITHUB_API = "https://api.github.com"
-MODEL = "claude-sonnet-4-6"
+# MID tier (infra-commons/meta model-registry.yaml `tier_equivalence:`) — the default
+# for CI review jobs like this one.
+MODEL = "claude-sonnet-5"
 COMMENT_MARKER = "<!-- traceability-check-bot -->"
 
 # Caps to keep the context window manageable.
