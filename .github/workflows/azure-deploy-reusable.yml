@@ -368,6 +368,16 @@ jobs:
                   print(f"WARNING: skipping {config_file}: {exc}", file=sys.stderr)
                   continue
 
+              # safe_load returns None for an empty or comment-only file, and a list or
+              # scalar for a YAML document that is not a mapping — none of which raise, so
+              # none of which the except above catches. Without this the next line raises
+              # AttributeError and the whole matrix load dies, aborting the deploy for
+              # EVERY client because one file was blank. Skip-with-a-warning is what the
+              # rest of this loop does for every other malformed input; do the same here.
+              if not isinstance(cfg, dict):
+                  print(f"WARNING: skipping {config_file.name} — not a YAML mapping (parsed as {type(cfg).__name__})", file=sys.stderr)
+                  continue
+
               slug = str(cfg.get("client_slug", ""))
               if not SLUG_RE.match(slug):
                   print(f"WARNING: skipping {config_file.name} — client_slug {slug!r} contains invalid characters", file=sys.stderr)
