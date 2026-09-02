@@ -368,6 +368,16 @@ jobs:
                   print(f"WARNING: skipping {config_file}: {exc}", file=sys.stderr)
                   continue
 
+              # safe_load returns None for an empty or comment-only file, and a list or
+              # scalar for a YAML document that is not a mapping — none of which raise, so
+              # none of which the except above catches. Without this the next line raises
+              # AttributeError and the whole matrix load dies, aborting the deploy for
+              # EVERY client because one file was blank. Skip-with-a-warning is what the
+              # rest of this loop does for every other malformed input; do the same here.
+              if not isinstance(cfg, dict):
+                  print(f"WARNING: skipping {config_file.name} — not a YAML mapping (parsed as {type(cfg).__name__})", file=sys.stderr)
+                  continue
+
               slug = str(cfg.get("client_slug", ""))
               if not SLUG_RE.match(slug):
                   print(f"WARNING: skipping {config_file.name} — client_slug {slug!r} contains invalid characters", file=sys.stderr)
@@ -504,11 +514,51 @@ jobs:
                   else:
                       _zr_on = bool(_zr_raw)
                   zero_retention = "true" if _zr_on else "false"
-                  # LLM model-ID pins (per alias). Claude IDs by default; an azure_openai
-                  # client overrides these with its Azure OpenAI deployment names (e.g. gpt-5).
-                  llm_model_sonnet = str(sol_config.get("llm_model_sonnet", "")) or "claude-sonnet-4-6"
-                  llm_model_haiku = str(sol_config.get("llm_model_haiku", "")) or "claude-haiku-4-5-20251001"
-                  llm_model_opus = str(sol_config.get("llm_model_opus", "")) or "claude-opus-4-7"
+                  # LLM model-ID pins, by ROLE rather than by capability tier.
+                  #
+                  # `primary` writes the delivered documents; `fast` does bounded structured
+                  # calls (classify, name extraction) and is the spend-cap degrade target.
+                  # These are the key names clients-config actually writes — verified live on
+                  # kin.yaml, rolliq-test.yaml and sandbox.yaml, and documented as the schema
+                  # in _template.yaml. This reusable previously read llm_model_sonnet/haiku/
+                  # opus, which NO client has ever set, so every lookup returned "" and the
+                  # defaults below were not fallbacks — they were the value, on every client.
+                  #
+                  # Tier names were renamed away for a reason worth not re-learning (rrc#881):
+                  # "sonnet"/"haiku"/"opus" became lies the moment a client moved to a
+                  # different model family, and every client here is on Azure OpenAI. rrc#893
+                  # shipped `primary` + `fast` only and destroyed the third alias outright;
+                  # this matches that shape rather than #881's superseded three-name proposal.
+                  #
+                  # NO DEFAULT ON azure_openai, DELIBERATELY. A Claude model ID is never a
+                  # valid Azure OpenAI deployment name, so defaulting there cannot be right —
+                  # and it fails at REQUEST time with a provider 404, not at boot: the
+                  # container reports Healthy, /health passes, the promote smoke test passes
+                  # (it makes no LLM call), and every inference call fails. A green promote
+                  # and a totally broken inference path look identical. Fail at matrix-load
+                  # instead, where it is one line of output and nothing has been deployed.
+                  # The anthropic/foundry paths keep a default because there a Claude ID IS
+                  # the right kind of value; those track the fleet model registry's declared
+                  # tiers (infra-commons/meta model-registry.yaml — mid for `primary`, fast
+                  # for `fast`, the dated haiku form being the canonical spelling there).
+                  llm_model_primary = str(sol_config.get("llm_model_primary", ""))
+                  llm_model_fast = str(sol_config.get("llm_model_fast", ""))
+                  if llm_provider == "azure_openai":
+                      _pins = (("llm_model_primary", llm_model_primary),
+                               ("llm_model_fast", llm_model_fast))
+                      _missing = [k for k, v in _pins if not v]
+                      if _missing:
+                          sys.exit(
+                              f"ERROR: client {slug!r} runs on azure_openai but sets no "
+                              + " and no ".join(_missing)
+                              + " in its solution config_overrides. There is no safe default: this "
+                              "workflow's Claude-family defaults are not valid Azure OpenAI deployment "
+                              "names, and an unset pin would deploy green and fail every inference call "
+                              "at request time. Set the deployment name(s) in clients-config."
+                          )
+                  else:
+                      llm_model_primary = llm_model_primary or "claude-sonnet-5"
+                      llm_model_fast = llm_model_fast or "claude-haiku-4-5-20251001"
                   # Azure OpenAI data-plane API version (azure_openai only; harmless otherwise).
                   azure_openai_api_version = str(sol_config.get("azure_openai_api_version", "")) or "2024-10-21"
                   # azure_openai Foundry wiring. azure_foundry_endpoint: the real endpoint
@@ -586,9 +636,8 @@ jobs:
                       "zero_retention":     zero_retention,
                       "sharepoint_site_id": sharepoint_site_id,
                       "llm_provider":       llm_provider,
-                      "llm_model_sonnet":   llm_model_sonnet,
-                      "llm_model_haiku":    llm_model_haiku,
-                      "llm_model_opus":     llm_model_opus,
+                      "llm_model_primary":  llm_model_primary,
+                      "llm_model_fast":     llm_model_fast,
                       "azure_openai_api_version": azure_openai_api_version,
                       "azure_foundry_endpoint": azure_foundry_endpoint,
                       "foundry_account_id": foundry_account_id,
@@ -1424,7 +1473,7 @@ jobs:
       - name: Terraform plan
         if: ${{ inputs.mode != 'onboard-identities' }}
         working-directory: infra
-        # llm_model_{sonnet,haiku,opus}, azure_openai_api_version, foundry_account_id,
+        # llm_model_{primary,fast}, azure_openai_api_version, foundry_account_id,
         # and the four *_blob refs are free text from clients-config with no regex
         # validation (unlike client_slug/tier/region/environment/model/operations/
         # llm_provider above, which are all regex- or enum-checked in load-matrix) —
@@ -1435,9 +1484,8 @@ jobs:
         # Terraform reads natively with no -var flag needed — the shell never
         # touches these values as anything but inert environment data.
         env:
-          TF_VAR_llm_model_sonnet: ${{ matrix.llm_model_sonnet }}
-          TF_VAR_llm_model_haiku: ${{ matrix.llm_model_haiku }}
-          TF_VAR_llm_model_opus: ${{ matrix.llm_model_opus }}
+          TF_VAR_llm_model_primary: ${{ matrix.llm_model_primary }}
+          TF_VAR_llm_model_fast: ${{ matrix.llm_model_fast }}
           TF_VAR_azure_openai_api_version: ${{ matrix.azure_openai_api_version }}
           TF_VAR_foundry_account_id: ${{ matrix.foundry_account_id }}
           TF_VAR_candidate_summary_style_blob: ${{ matrix.candidate_summary_style_blob }}
