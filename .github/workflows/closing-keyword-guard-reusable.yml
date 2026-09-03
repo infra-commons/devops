@@ -51,8 +51,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      # NOTE: pin the action ref to this repo's merge SHA after first merge
-      # (matches the traceability convention). @main is used pre-merge.
-      - uses: infra-commons/devops/.github/actions/closing-keyword-guard@main
+      # Pinned 2026-09-03 to an immutable main ancestor (infra-commons/meta#1284 ruling: one kind of ref);
+      # Dependabot is the only mover from here. Never @main.
+      - uses: infra-commons/devops/.github/actions/closing-keyword-guard@14ddfdc05a69ac171278b4f3fdf97d468dd8b54a # pinned 2026-09-03, infra-commons/meta#1284
         with:
           docs-patterns: ${{ inputs.docs_patterns }}

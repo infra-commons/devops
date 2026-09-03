@@ -1189,12 +1189,12 @@ jobs:
       # (see the PR that landed this comment for exact provenance) — a pure
       # relocation, not a behavior change.
       #
-      # NOTE: pin the action ref to this repo's merge SHA after first merge
-      # (matches the adversarial-review convention). @main is used pre-merge.
+      # Pinned 2026-09-03 to an immutable main ancestor (infra-commons/meta#1284 ruling: one kind of ref);
+      # Dependabot is the only mover from here. Never @main.
       - name: Bootstrap Terraform state backend (client_owned)
         id: state-backend
         if: ${{ matrix.model == 'client_owned' }}
-        uses: infra-commons/devops/.github/actions/bootstrap-tfstate-backend@main
+        uses: infra-commons/devops/.github/actions/bootstrap-tfstate-backend@14ddfdc05a69ac171278b4f3fdf97d468dd8b54a # pinned 2026-09-03, infra-commons/meta#1284
         with:
           client-slug:     ${{ matrix.client_slug }}
           subscription-id: ${{ matrix.subscription_id }}
@@ -1208,11 +1208,11 @@ jobs:
       # (platform-iac/scripts/provision-subscription.sh). Idempotent no-op on the
       # worn rolliq_managed path (a shared, already-registered subscription). Only
       # these two models exist; the explicit gate documents intent.
-      # NOTE: pin the action ref to this repo's merge SHA after first merge
-      # (matches the adversarial-review convention). @main is used pre-merge.
+      # Pinned 2026-09-03 to an immutable main ancestor (infra-commons/meta#1284 ruling: one kind of ref);
+      # Dependabot is the only mover from here. Never @main.
       - name: Register required resource providers (fresh subscription)
         if: ${{ matrix.model == 'client_owned' || matrix.model == 'rolliq_managed' }}
-        uses: infra-commons/devops/.github/actions/register-resource-providers@main
+        uses: infra-commons/devops/.github/actions/register-resource-providers@14ddfdc05a69ac171278b4f3fdf97d468dd8b54a # pinned 2026-09-03, infra-commons/meta#1284
         with:
           subscription-id: ${{ matrix.subscription_id }}
 

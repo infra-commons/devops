@@ -41,9 +41,9 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      # NOTE: pin the action ref to this repo's merge SHA after first merge
-      # (matches the adversarial-review convention). @main is used pre-merge.
-      - uses: infra-commons/devops/.github/actions/traceability@main
+      # Pinned 2026-09-03 to an immutable main ancestor (infra-commons/meta#1284 ruling: one kind of ref);
+      # Dependabot is the only mover from here. Never @main.
+      - uses: infra-commons/devops/.github/actions/traceability@14ddfdc05a69ac171278b4f3fdf97d468dd8b54a # pinned 2026-09-03, infra-commons/meta#1284
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           github-token: ${{ github.token }}
