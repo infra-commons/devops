@@ -310,7 +310,7 @@ jobs:
           # fine" to "does not compile" with nothing in between. Route any future
           # per-client value through `env:` above instead of splicing it in here.
           # Guarded by scripts/test_azure_deploy_reusable.py.
-          python3 << 'EOF'
+          python3 << 'PYEOF_MATRIX'
           import json, os, re, sys
           import yaml
           from pathlib import Path
@@ -656,7 +656,7 @@ jobs:
           matrix = json.dumps({"include": entries})
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write(f"matrix={matrix}\n")
-          EOF
+          PYEOF_MATRIX
 
 
   # ── 3. Deploy to each client (fail-isolated) ────────────────────────────────

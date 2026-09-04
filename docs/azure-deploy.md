@@ -155,7 +155,7 @@ E2E gate (real pipeline run)").
 `infra-commons/devops` holds no Azure credentials, so nothing here can prove a real `terraform
 apply`/bicep deploy — that proof is the extraction issue's DoD item 2, and it's the adopting org's
 to run against its own pre-flight environment. What `scripts/test_azure_deploy_reusable.py` proves
-instead, stdlib-only (no PyYAML, matching every other test script in this repo):
+instead, stdlib-only (no PyYAML, like most test scripts here):
 
 - No `run:` block in any `*-reusable.yml` here is within ~5,000 characters of GitHub's
   21,000-character expression-compile cap — the failure mode that made every deploy impossible for
@@ -167,6 +167,14 @@ instead, stdlib-only (no PyYAML, matching every other test script in this repo):
   compile" in a single character, with nothing to warn the next editor.
 - The guard's own pinned subjects (the largest expression-free block, the largest interpolated one)
   still exist — a guard that silently stops finding what it was written for is worse than no guard.
+
+`scripts/test_azure_deploy_matrix.py` covers the load-matrix step's behaviour rather than its shape:
+it lifts that step's `PYEOF_MATRIX` program out of the workflow, runs it against synthetic client
+configs in a temp directory, and asserts the three behaviours `#38` shipped — a client file that
+parses to a non-mapping is skipped rather than aborting every client's deploy, `azure_openai` with
+an unset model pin hard-fails at matrix-load, and `anthropic`/`foundry` resolve the declared fleet
+defaults. Unlike the checks above it needs PyYAML (`pip install pyyaml`), because the program under
+test imports it.
 
 Run it locally: `python3 scripts/test_azure_deploy_reusable.py`. Also run
 `python3 scripts/test_reusable_caller_docs.py` after any change to a job's `permissions:` or to this
@@ -182,8 +190,8 @@ read it" guarantee `signed-dpa-gate.yml`'s `dpa-gate-self-test.yml` already give
 
 ## Changing the reusable
 
-Two checks currently guard this file, both stdlib-only and run directly (this repo carries no
-`ci.yml`, `testing: {suite: none}` in the fleet's own devops standard):
+Four checks currently guard this file, all run directly (this repo carries no `ci.yml`,
+`testing: {suite: none}` in the fleet's own devops standard):
 
 1. `python3 scripts/test_reusable_caller_docs.py` — every job's `permissions:` must still be
    grantable from the header's own documented caller snippet.
@@ -192,6 +200,10 @@ Two checks currently guard this file, both stdlib-only and run directly (this re
 3. `python3 scripts/test_security_review_gate.py` — the Security review gate's PR verification
    (merged, touches the file, hash-pinned, distinctly approved) must still fail closed on every
    negative control; also wired into CI, see above.
+4. `python3 scripts/test_azure_deploy_matrix.py` — the load-matrix program's three shipped
+   behaviours, executed rather than read. Needs PyYAML. Run it after any change inside the
+   `PYEOF_MATRIX` block; it fails loudly if that block is reshaped so the extraction can no longer
+   find it unambiguously.
 
 Adding a new caller-specific hardening layer (the follow-on PRs described above): copy the step(s)
 verbatim from whichever source repo has them, wrap the copied step(s) in `if: inputs.enable_<name>`

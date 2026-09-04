@@ -46,10 +46,10 @@ HEREDOC_CLOSE = "\n          EOF"
 def gate_source() -> "code":  # noqa: F821 - forward-ref only, no runtime import needed
     """The gate's verification program, lifted from the shipped workflow.
 
-    This file has TWO `python3 << 'EOF'` heredocs (the other is "Build deployment
-    matrix", covered by test_azure_deploy_reusable.py) — scope the search to the
-    "Security review gate" step first so this can't silently start extracting the
-    wrong one.
+    This file has a second heredoc'd python3 program — "Build deployment matrix",
+    whose delimiter is `PYEOF_MATRIX` and which test_azure_deploy_matrix.py extracts
+    and executes. Scope the search to the "Security review gate" step first anyway,
+    so this can't silently start extracting the wrong one if that ever changes back.
     """
     text = WORKFLOW.read_text()
     if text.count(STEP_MARKER) != 1:
