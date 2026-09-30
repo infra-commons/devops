@@ -37,7 +37,7 @@ import httpx
 GITHUB_API = "https://api.github.com"
 # MID tier (infra-commons/meta model-registry.yaml `tier_equivalence:`) — the default
 # for CI review jobs like this one.
-MODEL = "claude-sonnet-5"
+MODEL = "claude-sonnet-5-5"
 COMMENT_MARKER = "<!-- traceability-check-bot -->"
 
 # Caps to keep the context window manageable.
@@ -230,11 +230,24 @@ def run_traceability(api_key: str, requirements: str, adrs: str, codebase: str) 
         try:
             message = client.messages.create(
                 model=MODEL,
-                max_tokens=4096,
+                # Thinking tokens count against this cap: claude-sonnet-5-5 runs
+                # adaptive thinking when `thinking` is omitted (and rejects
+                # {type: "disabled"}), so the old 4096 left the report itself less room.
+                max_tokens=16000,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
             )
-            text = message.content[0].text
+            # Not content[0]: under adaptive thinking the first block can be a
+            # `thinking` block (empty text by default), which has no `.text`.
+            text = "".join(b.text for b in message.content if b.type == "text")
+            if message.stop_reason == "refusal":
+                # A refusal returns HTTP 200 with little or no text; posted bare it
+                # would read as an empty, i.e. clean, report.
+                return (
+                    "> ⚠️ **No report** — the model declined this request "
+                    "(stop_reason=refusal). This is not a clean result; re-run "
+                    "or review traceability by hand."
+                )
             if message.stop_reason == "max_tokens":
                 # A truncated report posted verbatim reads as complete — a
                 # reviewer sees no "Misalignments" section and reads that as

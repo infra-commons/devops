@@ -3,7 +3,7 @@
 
 Found by three independent review passes: `run_traceability()` returned
 `message.content[0].text` with no check of `message.stop_reason`. A response
-truncated at `max_tokens` (4096) was posted to the PR verbatim as a complete
+truncated at `max_tokens` was posted to the PR verbatim as a complete
 `## Traceability Report` — a reviewer seeing no "Misalignments" section reads
 that as "none found", not "cut off before reaching it". Advisory-only (never
 blocks merge), but it's the exact "degraded result read as clean" defect class
@@ -19,6 +19,7 @@ Run: python3 scripts/test_traceability_check.py
 
 import pathlib
 import sys
+import types
 from unittest import mock
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -42,9 +43,9 @@ def test(label):
     return deco
 
 
-def fake_client(text: str, stop_reason: str):
+def fake_client(text: str, stop_reason: str, blocks=None):
     message = mock.Mock()
-    message.content = [mock.Mock(text=text)]
+    message.content = blocks if blocks is not None else [types.SimpleNamespace(type="text", text=text)]
     message.stop_reason = stop_reason
     client = mock.Mock()
     client.messages.create.return_value = message
@@ -67,6 +68,26 @@ def _():
         out = tc.run_traceability("key", "reqs", "adrs", "code")
     assert "cut off" in out, f"truncated response has no truncation notice:\n{out}"
     assert out.startswith("## Report\n\n### Misalignmen"), "the truncation notice must not replace the partial report"
+
+
+@test("a leading thinking block (adaptive thinking on claude-sonnet-5-5) is skipped, not read as text")
+def _():
+    # SimpleNamespace, not Mock: a Mock invents `.text` on any block, which is
+    # exactly how a content[0].text read would slip past this test.
+    blocks = [types.SimpleNamespace(type="thinking", thinking="", signature="sig"),
+              types.SimpleNamespace(type="text", text="## Report\n\nAll good.")]
+    with mock.patch.object(tc.anthropic, "Anthropic",
+                            return_value=fake_client("", "end_turn", blocks=blocks)):
+        out = tc.run_traceability("key", "reqs", "adrs", "code")
+    assert out == "## Report\n\nAll good.", out
+
+
+@test("a refusal (HTTP 200, stop_reason=refusal) is reported as no report, not an empty clean one")
+def _():
+    with mock.patch.object(tc.anthropic, "Anthropic",
+                            return_value=fake_client("", "refusal", blocks=[])):
+        out = tc.run_traceability("key", "reqs", "adrs", "code")
+    assert "No report" in out and "refusal" in out, out
 
 
 def main() -> int:

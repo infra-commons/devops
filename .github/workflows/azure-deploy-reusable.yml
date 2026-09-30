@@ -557,7 +557,7 @@ jobs:
                               "at request time. Set the deployment name(s) in clients-config."
                           )
                   else:
-                      llm_model_primary = llm_model_primary or "claude-sonnet-5"
+                      llm_model_primary = llm_model_primary or "claude-sonnet-5-5"
                       llm_model_fast = llm_model_fast or "claude-haiku-4-5-20251001"
                   # Azure OpenAI data-plane API version (azure_openai only; harmless otherwise).
                   azure_openai_api_version = str(sol_config.get("azure_openai_api_version", "")) or "2024-10-21"
