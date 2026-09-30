@@ -53,7 +53,7 @@ SUBSCRIPTION_ID = "00000000-0000-4000-8000-000000000001"
 
 # Asserted by value, not as "something non-empty": a stale default no client could override is the
 # exact defect `#37` was filed for.
-DEFAULT_PRIMARY = "claude-sonnet-5"
+DEFAULT_PRIMARY = "claude-sonnet-5-5"
 DEFAULT_FAST = "claude-haiku-4-5-20251001"
 
 PASSED, REJECTED, CRASHED = "passed", "rejected", "crashed"
