@@ -213,7 +213,7 @@ jobs:
         run: echo "Promoting pinned image ${IMAGE_REF} — build skipped."
 
       # Authenticate to the management subscription (hosts the central ACR).
-      - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
         if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -224,7 +224,7 @@ jobs:
         if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
         run: az acr login --name "${{ secrets.ACR_NAME }}"
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
         if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
 
       - name: Stamp build metadata
@@ -239,7 +239,7 @@ jobs:
       - name: Build and push
         id: build-push
         if: ${{ inputs.image_ref == '' && inputs.mode != 'onboard-identities' }}
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           push: true
@@ -796,7 +796,7 @@ jobs:
       # AZURE_CLIENT_ID/AZURE_TENANT_ID are the CUSTOMER's, which cannot authenticate
       # into Rolliq's tenant/subscription — that path reaches the central ACR with
       # the repo-level ACR_IMPORT credentials (never env-shadowed) in the next step.
-      - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
         if: ${{ matrix.environment == 'prod' && matrix.model == 'rolliq_managed' }}
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -1146,7 +1146,7 @@ jobs:
           EOF
 
       # Authenticate using OIDC — no long-lived credentials stored anywhere.
-      - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -1527,7 +1527,7 @@ jobs:
       # steps use ARM_USE_OIDC and mint their own fresh tokens, so only the az CLI
       # seed path is exposed. Re-login here; az then caches the vault token for
       # ~60 min, so this one re-login covers every seed step that follows.
-      - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
