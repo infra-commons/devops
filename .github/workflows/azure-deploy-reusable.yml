@@ -540,7 +540,7 @@ jobs:
                   # The anthropic/foundry paths keep a default because there a Claude ID IS
                   # the right kind of value; those track the fleet model registry's declared
                   # tiers (infra-commons/meta model-registry.yaml — mid for `primary`, fast
-                  # for `fast`, the dated haiku form being the canonical spelling there).
+                  # for `fast`).
                   llm_model_primary = str(sol_config.get("llm_model_primary", ""))
                   llm_model_fast = str(sol_config.get("llm_model_fast", ""))
                   if llm_provider == "azure_openai":
@@ -558,7 +558,7 @@ jobs:
                           )
                   else:
                       llm_model_primary = llm_model_primary or "claude-sonnet-5-5"
-                      llm_model_fast = llm_model_fast or "claude-haiku-4-5-20251001"
+                      llm_model_fast = llm_model_fast or "claude-haiku-5-5"
                   # Azure OpenAI data-plane API version (azure_openai only; harmless otherwise).
                   azure_openai_api_version = str(sol_config.get("azure_openai_api_version", "")) or "2024-10-21"
                   # azure_openai Foundry wiring. azure_foundry_endpoint: the real endpoint
